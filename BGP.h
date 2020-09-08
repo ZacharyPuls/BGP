@@ -7,11 +7,10 @@
 #include <vector>
 #include <iostream>
 #include <cassert>
+#include <functional>
 #include <sstream>
-#include <boost/shared_ptr.hpp>
-#include <boost/enable_shared_from_this.hpp>
-#include <boost/asio.hpp>
-#include <boost/asio/io_context.hpp>
+
+#include <server/asio/tcp_server.h>
 
 // TODO: [1] Verify support for RFC 6286 (ASNs do not need to be unique)
 // TODO: [2] Support for RFC 6608 (Extended FSM error subcodes)
@@ -26,25 +25,3 @@
 // TODO: [11] Support for the rest of the possible path attribute types, reference the IANA registry
 // TODO: [12] Evaluate the pros/cons of foregoing using std::vector<uint8_t>, and switching over to raw pointers (uint8_t*, void*, et al). This will require empirical evidence being gathered, via performance/memory tests, including full/multiple table edge cases
 // TODO: [13] If a BGP UPDATE message is received with the same prefix in the WithdrawnRoutes and NLRI fields, ignore the prefix in WithdrawnRoutes
-
-class BgpSession : public boost::enable_shared_from_this<BgpSession>
-{
-	
-};
-
-class BgpDaemon
-{
-public:
-	BgpDaemon(boost::asio::io_context& ioContext) : ioContext_(ioContext), acceptor_(ioContext, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), 179))
-	{
-		startAccept_();
-	}
-private:
-	boost::asio::io_context& ioContext_;
-	boost::asio::ip::tcp::acceptor acceptor_;
-
-	void startAccept_()
-	{
-		
-	}
-};

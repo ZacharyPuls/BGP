@@ -208,7 +208,7 @@ std::vector<uint8_t> flattenBgpCapabilities(const std::vector<BgpCapability>& ca
 	{
 		flattenedCapabilities.emplace_back(static_cast<uint8_t>(capability.Code));
 		flattenedCapabilities.emplace_back(capability.Length);
-		std::copy(capability.Value.begin(), capability.Value.end(), flattenedCapabilities.end());
+		flattenedCapabilities.insert(flattenedCapabilities.end(), capability.Value.begin(), capability.Value.end());
 	}
 
 	return flattenedCapabilities;
@@ -254,6 +254,18 @@ struct BgpOpenMessage
 	uint32_t Identifier;
 	std::vector<BgpCapability> Capabilities;
 
+	[[nodiscard]] uint16_t GetLength() const
+	{
+		uint16_t capabilitiesLength = 0;
+
+		for (const auto& capability : Capabilities)
+		{
+			capabilitiesLength += static_cast<uint16_t>(capability.Length) + 2;
+		}
+		
+		return 9 + capabilitiesLength;
+	}
+	
 	[[nodiscard]] std::string DebugOutput() const
 	{
 		std::stringstream output;
@@ -287,7 +299,7 @@ std::vector<uint8_t> flattenBgpOpenMessage(const BgpOpenMessage message)
 	};
 
 	auto capabilities = flattenBgpCapabilities(message.Capabilities);
-	std::copy(capabilities.begin(), capabilities.end(), openMessage.end());
+	openMessage.insert(openMessage.end(), capabilities.begin(), capabilities.end());
 	
 	return openMessage;
 }
@@ -313,6 +325,19 @@ struct Route
 	uint32_t Prefix;
 	// TODO: [9]
 	// std::vector<uint8_t> Prefix;
+	
+	[[nodiscard]] std::string DebugOutput() const
+	{
+		std::stringstream output;
+		output << "Length: " << std::to_string(Length) << std::endl;
+
+		const std::vector<uint8_t> prefixDottedDecimal = { _32to8(Prefix) };
+		output << "Prefix: " << std::to_string(prefixDottedDecimal[0]) << "." << std::to_string(prefixDottedDecimal[1])
+			<< "." << std::to_string(prefixDottedDecimal[2]) << "." << std::to_string(prefixDottedDecimal[3]) <<
+			std::endl;
+
+		return output.str();
+	}
 };
 
 /* TODO: [9]
@@ -407,6 +432,65 @@ enum PathAttributeType : uint8_t
 	BGPsecPathAttribute = 33
 };
 
+std::string PathAttributeTypeToString(const PathAttributeType pathAttributeType)
+{
+	switch (pathAttributeType)
+	{
+	case ReservedAttributeType:
+		return "ReservedAttributeType";
+	case OriginAttribute:
+		return "OriginAttribute";
+	case AsPathAttribute:
+		return "AsPathAttribute";
+	case NextHopAttribute:
+		return "NextHopAttribute";
+	case MultiExitDiscriminatorAttribute:
+		return "MultiExitDiscriminatorAttribute";
+	case LocalPrefAttribute:
+		return "LocalPrefAttribute";
+	case AtomicAggregateAttribute:
+		return "AtomicAggregateAttribute";
+	case AggregatorAttribute:
+		return "AggregatorAttribute";
+	case CommunityAttribute:
+		return "CommunityAttribute";
+	case OriginatorIdAttribute:
+		return "OriginatorIdAttribute";
+	case ClusterListAttribute:
+		return "ClusterListAttribute";
+	case MpReachNlriAttribute:
+		return "MpReachNlriAttribute";
+	case MpUnreachNlriAttribute:
+		return "MpUnreachNlriAttribute";
+	case ExtendedCommunitiesAttribute:
+		return "ExtendedCommunitiesAttribute";
+	case As4PathAttribute:
+		return "As4PathAttribute";
+	case As4AggregatorAttribute:
+		return "As4AggregatorAttribute";
+	case PMSITunnelAttribute:
+		return "PMSITunnelAttribute";
+	case TunnelEncapsulationAttribute:
+		return "TunnelEncapsulationAttribute";
+	case TrafficEngineeringAttribute:
+		return "TrafficEngineeringAttribute";
+	case Ipv6AddressSpecificExtendedCommunityAttribute:
+		return "Ipv6AddressSpecificExtendedCommunityAttribute";
+	case AIGPAttribute:
+		return "AIGPAttribute";
+	case PEDistinguisherLabelsAttribute:
+		return "PEDistinguisherLabelsAttribute";
+	case BGPLSAttribute:
+		return "BGPLSAttribute";
+	case LargeCommunityAttribute:
+		return "LargeCommunityAttribute";
+	case BGPsecPathAttribute:
+		return "BGPsecPathAttribute";
+	default:
+		return "InvalidPathAttributeType";
+	}
+}
+
 // Well-known mandatory
 enum Origin : uint8_t
 {
@@ -463,6 +547,17 @@ struct PathAttribute
 
 	// TODO: if Flags & PathAttributeFlagBits::TwoByteAttribute, Value[0] and Value[1] contain the length of the attribute data. Otherwise, Value[0] contains the length.
 	std::vector<uint8_t> Value;
+	
+	[[nodiscard]] std::string DebugOutput() const
+	{
+		std::stringstream output;
+
+		output << "Flags: " << std::to_string(Flags) << std::endl;
+		output << "Type: " << PathAttributeTypeToString(Type) << std::endl;
+		// TODO: also output Value, will need to add string transformations for all possible attribute type/value pairs.
+
+		return output.str();
+	}
 };
 
 typedef Route NLRI;
@@ -474,6 +569,34 @@ struct BgpUpdateMessage
 	uint16_t PathAttributesLength;
 	std::vector<PathAttribute> PathAttributes;
 	std::vector<NLRI> NLRI;
+	
+	[[nodiscard]] std::string DebugOutput() const
+	{
+		std::stringstream output;
+		output << "BGP UPDATE" << std::endl;
+		output << "WithdrawnRoutesLength: " << std::to_string(WithdrawnRoutesLength) << std::endl;
+
+		for (const auto& route : WithdrawnRoutes)
+		{
+			output << route.DebugOutput();
+		}
+		
+		output << "PathAttributesLength: " << std::to_string(PathAttributesLength) << std::endl;
+
+		for (const auto& pathAttribute : PathAttributes)
+		{
+			output << pathAttribute.DebugOutput();
+		}
+
+		output << "NLRI: " << std::endl;
+		
+		for (const auto& nlri : NLRI)
+		{
+			output << nlri.DebugOutput();
+		}
+
+		return output.str();
+	}
 };
 
 std::vector<uint8_t> flattenBgpUpdateMessage(const BgpUpdateMessage message)
@@ -607,6 +730,23 @@ enum MessageHeaderErrorSubcode : uint8_t
 	BadMessageType = 3
 };
 
+std::string MessageHeaderErrorSubcodeToString(const MessageHeaderErrorSubcode subcode)
+{
+	switch (subcode)
+	{
+	case UnspecificMessageHeaderError:
+		return "UnspecificMessageHeaderError";
+	case ConnectionNotSynchronized:
+		return "ConnectionNotSynchronized";
+	case BadMessageLength:
+		return "BadMessageLength";
+	case BadMessageType:
+		return "BadMessageType";
+	default:
+		return "InvalidMessageHeaderErrorSubcode";
+	}
+}
+
 enum OpenMessageErrorSubcode : uint8_t
 {
 	/*
@@ -628,6 +768,31 @@ enum OpenMessageErrorSubcode : uint8_t
 	UnsupportedCapability = 7,
 	RoleMismatch = 8
 };
+
+std::string OpenMessageErrorSubcodeToString(const OpenMessageErrorSubcode subcode)
+{
+	switch (subcode)
+	{
+	case UnspecificOpenMessageError:
+		return "UnspecificOpenMessageError";
+	case UnsupportedVersionNumber:
+		return "UnsupportedVersionNumber";
+	case BadPeerAs:
+		return "BadPeerAs";
+	case BadBgpIdentifier:
+		return "BadBgpIdentifier";
+	case UnsupportedOptionalParameter:
+		return "UnsupportedOptionalParameter";
+	case UnacceptableHoldTime:
+		return "UnacceptableHoldTime";
+	case UnsupportedCapability:
+		return "UnsupportedCapability";
+	case RoleMismatch:
+		return "RoleMismatch";
+	default:
+		return "InvalidOpenMessageErrorSubcode";
+	}
+}
 
 enum UpdateMessageErrorSubcode : uint8_t
 {
@@ -657,6 +822,37 @@ enum UpdateMessageErrorSubcode : uint8_t
 	MalformedAsPath = 11
 };
 
+std::string UpdateMessageErrorSubcodeToString(const UpdateMessageErrorSubcode subcode)
+{
+	switch (subcode)
+	{
+	case UnspecificUpdateMessageError:
+		return "UnspecificUpdateMessageError";
+	case MalformedAttributeList:
+		return "MalformedAttributeList";
+	case UnrecognizedWellKnownAttribute:
+		return "UnrecognizedWellKnownAttribute";
+	case MissingWellKnownAttribute:
+		return "MissingWellKnownAttribute";
+	case AttributeFlagsError:
+		return "AttributeFlagsError";
+	case AttributeLengthError:
+		return "AttributeLengthError";
+	case InvalidOriginAttribute:
+		return "InvalidOriginAttribute";
+	case InvalidNextHopAttribute:
+		return "InvalidNextHopAttribute";
+	case OptionalAttributeError:
+		return "OptionalAttributeError";
+	case InvalidNetworkField:
+		return "InvalidNetworkField";
+	case MalformedAsPath:
+		return "MalformedAsPath";
+	default:
+		return "InvalidUpdateMessageErrorSubcode";
+	}
+}
+
 enum FSMErrorSubcode : uint8_t
 {
 	/*
@@ -671,6 +867,22 @@ enum FSMErrorSubcode : uint8_t
 	ReceivedUnexpectedMessageInEstablishedState = 3
 };
 
+std::string FSMErrorSubcodeToString(const FSMErrorSubcode subcode)
+{
+	switch (subcode)
+	{
+	case UnspecifiedFSMError:
+		return "UnspecifiedFSMError";
+	case ReceivedUnexpectedMessageInOpenSentState:
+		return "ReceivedUnexpectedMessageInOpenSentState";
+	case ReceivedUnexpectedMessageInOpenConfirmState:
+		return "ReceivedUnexpectedMessageInOpenConfirmState";
+	case ReceivedUnexpectedMessageInEstablishedState:
+		return "ReceivedUnexpectedMessageInEstablishedState";
+	default:
+		return "InvalidFSMErrorSubcode";
+	}
+}
 enum CeaseErrorSubcode : uint8_t
 {
 	/*
@@ -697,20 +909,100 @@ enum CeaseErrorSubcode : uint8_t
 	HardReset = 9
 };
 
-enum RouteRefreshErrorSubcode : uint8_t
+std::string CeaseErrorSubcodeToString(const CeaseErrorSubcode subcode)
+{
+	switch (subcode)
+	{
+	case CeaseErrorReserved:
+		return "CeaseErrorReserved";
+	case MaximumNumberOfPrefixesReached:
+		return "MaximumNumberOfPrefixesReached";
+	case AdministrativeShutdown:
+		return "AdministrativeShutdown";
+	case PeerDeconfigured:
+		return "PeerDeconfigured";
+	case AdministrativeReset:
+		return "AdministrativeReset";
+	case ConnectionRejected:
+		return "ConnectionRejected";
+	case OtherConfigurationChange:
+		return "OtherConfigurationChange";
+	case ConnectionCollisionResolution:
+		return "ConnectionCollisionResolution";
+	case OutOfResources:
+		return "OutOfResources";
+	case HardReset:
+		return "HardReset";
+	default:
+		return "InvalidCeaseErrorSubcode";
+	}
+}
+
+enum RouteRefreshMessageErrorSubcode : uint8_t
 {
 	/*
 	 * 0 Reserved [RFC7313]
 	 * 1 Invalid Message Length [RFC7313]
 	 */
-	RouteRefreshErrorReserved = 0,
+	RouteRefreshMessageErrorReserved = 0,
 	InvalidMessageLength = 1
 };
+
+std::string RouteRefreshMessageErrorSubcodeToString(const RouteRefreshMessageErrorSubcode subcode)
+{
+	switch (subcode)
+	{
+	case RouteRefreshMessageErrorReserved:
+		return "RouteRefreshMessageErrorReserved";
+	case InvalidMessageLength:
+		return "InvalidMessageLength";
+	default:
+		return "InvalidRouteRefreshMessageErrorSubcode";
+	}
+}
 
 struct BgpError
 {
 	uint8_t Code;
 	uint8_t Subcode;
+
+	[[nodiscard]] std::string DebugOutput() const
+	{
+		std::stringstream output;
+
+		switch (Code)
+		{
+			case ReservedNotificationErrorCode:
+				output << "ReservedNotificationErrorCode" << std::endl;
+				break;
+			case MessageHeaderError:
+				output << "MessageHeaderError: " << MessageHeaderErrorSubcodeToString(static_cast<MessageHeaderErrorSubcode>(Subcode)) << std::endl;
+				break;
+			case OpenMessageError:
+				output << "OpenMessageError: " << OpenMessageErrorSubcodeToString(static_cast<OpenMessageErrorSubcode>(Subcode)) << std::endl;
+				break;
+			case UpdateMessageError:
+				output << "UpdateMessageError: " << UpdateMessageErrorSubcodeToString(static_cast<UpdateMessageErrorSubcode>(Subcode)) << std::endl;
+				break;
+			case HoldTimerExpired:
+				output << "HoldTimerExpired" << std::endl;
+				break;
+			case FSMError:
+				output << "FSMError: " << FSMErrorSubcodeToString(static_cast<FSMErrorSubcode>(Subcode)) << std::endl;
+				break;
+			case CeaseError:
+				output << "CeaseError: " << CeaseErrorSubcodeToString(static_cast<CeaseErrorSubcode>(Subcode)) << std::endl;
+				break;
+			case RouteRefreshMessageError:
+				output << "RouteRefreshMessageError: " << RouteRefreshMessageErrorSubcodeToString(static_cast<RouteRefreshMessageErrorSubcode>(Subcode)) << std::endl;
+				break;
+			default:
+				output << "Invalid BgpError Code " << std::to_string(Code) << std::endl;
+				break;
+		}
+		
+		return output.str();
+	}
 };
 
 struct BgpNotificationMessage
@@ -728,12 +1020,23 @@ struct BgpNotificationMessage
     // TODO: Handle all error scenarios detailed in RFC 4271 Section 6
 	BgpError Error;
 	std::vector<uint8_t> Data;
+	
+	[[nodiscard]] std::string DebugOutput() const
+	{
+		std::stringstream output;
+
+		output << "Error: " << std::endl;
+		output << Error.DebugOutput();
+		// TODO: Also handle/output Data field.
+		
+		return output.str();
+	}
 };
 
 std::vector<uint8_t> flattenBgpNotificationMessage(const BgpNotificationMessage message)
 {
 	std::vector<uint8_t> notificationMessage = { message.Error.Code, message.Error.Subcode };
-	std::copy(message.Data.begin(), message.Data.end(), notificationMessage.end());
+	notificationMessage.insert(notificationMessage.end(), message.Data.begin(), message.Data.end());
 	return notificationMessage;
 }
 
@@ -750,20 +1053,147 @@ BgpNotificationMessage parseBgpNotificationMessage(const std::vector<uint8_t>& m
 	return message;
 }
 
+class BgpSession : public CppServer::Asio::TCPSession
+{
+public:
+	using TCPSession::TCPSession;
+
+protected:
+	void onConnected() override
+	{
+		BgpOpenMessage openMessage = {
+			0x04,
+			65002,
+			180,
+			16843009
+		};
+
+		openMessage.Capabilities.emplace_back(BgpCapability{
+			MPBGP, 4, {0x01 /*IPv4 AFI*/, 0x00 /*Reserved*/, 0x01 /*Unicast SAFI*/}
+		});
+
+		openMessage.Capabilities.emplace_back(BgpCapability{RouteRefreshCapability, 0});
+
+		openMessage.Capabilities.emplace_back(BgpCapability{EnhancedRouteRefresh, 0});
+
+		openMessage.Capabilities.emplace_back(BgpCapability{FourByteAsn, 4, {_32to8(65002)}});
+
+		
+		auto messageHeader = generateBgpHeader(openMessage.GetLength(), MessageType::Open);
+		std::vector<uint8_t> messageBytes(messageHeader.begin(), messageHeader.end());
+		auto messageBody = flattenBgpOpenMessage(openMessage);
+		messageBytes.insert(messageBytes.end(), messageBody.begin(), messageBody.end());
+
+		SendAsync(&messageBytes[0], messageBytes.size());
+	}
+
+	void onDisconnected() override
+	{
+		std::cout << "BgpSession with ID " << id() << " was disconnected." << std::endl;
+	}
+	
+	void onReceived(const void* buffer, size_t size) override
+	{
+		auto* const bytesBuffer = (uint8_t*)buffer;
+		std::vector<uint8_t> messageBytes(bytesBuffer, bytesBuffer + size);
+		const std::vector<uint8_t> headerMessageBytes(messageBytes.begin(), messageBytes.begin() + 19);
+
+		const auto header = parseBgpHeader(headerMessageBytes);
+		
+		std::cout << "Received BGP message header with Type " << MessageTypeToString(header.Type) << " and Length " << header.Length << std::endl;
+
+		if (header.Length > 19) {
+			const std::vector<uint8_t> payloadMessageBytes(messageBytes.begin() + 19, messageBytes.end());
+			switch (header.Type)
+			{
+			case Open:
+			{
+				auto openMessage = parseBgpOpenMessage(payloadMessageBytes);
+				std::cout << "Received BGP OPEN message: " << std::endl;
+				std::cout << openMessage.DebugOutput();
+				break;
+			}
+			case Update:
+			{
+				auto updateMessage = parseBgpUpdateMessage(payloadMessageBytes);
+				std::cout << "Received BGP UPDATE message: " << std::endl;
+				std::cout << updateMessage.DebugOutput();
+				break;
+			}
+			case Notification:
+				{
+				auto notificationMessage = parseBgpNotificationMessage(payloadMessageBytes);
+				std::cout << "Received BGP NOTIFICATION message: " << std::endl;
+				std::cout << notificationMessage.DebugOutput();
+				break;
+				}
+			case Keepalive:
+				std::cerr << "Keepalive message received with Length > 19. This is not RFC4271-compliant." << std::endl;
+				break;
+			case ReservedMessageType:
+			case RouteRefresh:
+			default:
+				std::cerr << "Unsupported message type " << MessageTypeToString(header.Type) << std::endl;
+				break;
+			}
+		}
+	}
+
+	void onError(int error, const std::string& category, const std::string& message) override
+	{
+		std::cout << "BgpSession caught an error with code " << error << " and category '" << category << "': " << message << std::endl;
+	}
+};
+
+class BgpServer : public CppServer::Asio::TCPServer
+{
+public:
+	using TCPServer::TCPServer;
+
+protected:
+	std::shared_ptr<CppServer::Asio::TCPSession> CreateSession(const std::shared_ptr<TCPServer>& server) override
+	{
+		return std::make_shared<BgpSession>(server);
+	}
+
+	void onError(int error, const std::string& category, const std::string& message) override
+	{
+		std::cout << "BgpServer caught an error with code " << error << " and category '" << category << "': " << message << std::endl;
+	}
+};
+
 int main()
 {
-	std::vector<uint8_t> messageBytes = {
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0x00, 0x13, 0x04
-	};
+	std::cout << "Starting BgpServer on port 179." << std::endl;
 
-	std::vector<uint8_t> headerBytes(19);
-	std::copy_n(messageBytes.begin(), 19, headerBytes.begin());
+	auto service = std::make_shared<CppServer::Asio::Service>();
+
+	std::cout << "Starting Asio service...";
+	service->Start();
+	std::cout << "Done." << std::endl;
+
+	auto server = std::make_shared<BgpServer>(service, 179);
+
+	std::cout << "Starting BgpServer...";
+	server->Start();
+	std::cout << "Done." << std::endl;
+
+	std::string line;
+	while (std::getline(std::cin, line))
+	{
+		if (line.empty())
+		{
+			break;
+		}
+	}
+
+	std::cout << "Stopping BgpServer...";
+	server->Stop();
+	std::cout << "Done." << std::endl;
 	
-	auto header = parseBgpHeader(headerBytes);
-
-	std::cout << "Length: " << std::to_string(header.Length) << std::endl;
-	std::cout << "Type: " << MessageTypeToString(header.Type) << std::endl;
-
+	std::cout << "Stopping Asio service...";
+	service->Stop();
+	std::cout << "Done." << std::endl;
+	
 	return 0;
 }

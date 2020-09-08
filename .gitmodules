@@ -1,0 +1,3 @@
+[submodule "extern/CppServer"]
+	path = extern/CppServer
+	url = https://github.com/chronoxor/CppServer.git
