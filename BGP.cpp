@@ -64,7 +64,7 @@ std::array<uint8_t, 19> generateBgpHeader(const uint16_t payloadLength, const Me
 		0xFF, 0xFF, 0xFF, 0xFF,
 		0xFF, 0xFF, 0xFF, 0xFF,
 		// Length
-		_16to8(payloadLength),
+		_16to8(payloadLength + 19),
 		// Type
 		messageType
 	};
@@ -256,14 +256,19 @@ struct BgpOpenMessage
 
 	[[nodiscard]] uint16_t GetLength() const
 	{
-		uint16_t capabilitiesLength = 0;
+		return static_cast<uint16_t>(10 + GetCapabilitiesLength());
+	}
+
+	[[nodiscard]] uint8_t GetCapabilitiesLength() const
+	{
+		uint8_t capabilitiesLength = 0;
 
 		for (const auto& capability : Capabilities)
 		{
-			capabilitiesLength += static_cast<uint16_t>(capability.Length) + 2;
+			capabilitiesLength += capability.Length + 2;
 		}
-		
-		return 9 + capabilitiesLength;
+
+		return capabilitiesLength;
 	}
 	
 	[[nodiscard]] std::string DebugOutput() const
@@ -296,6 +301,8 @@ std::vector<uint8_t> flattenBgpOpenMessage(const BgpOpenMessage message)
 		_16to8(message.HoldTime),
 		// BGP Identifier
 		_32to8(message.Identifier),
+		// Capabilities Length
+		message.GetCapabilitiesLength()
 	};
 
 	auto capabilities = flattenBgpCapabilities(message.Capabilities);
@@ -1068,15 +1075,15 @@ protected:
 			16843009
 		};
 
-		openMessage.Capabilities.emplace_back(BgpCapability{
-			MPBGP, 4, {0x01 /*IPv4 AFI*/, 0x00 /*Reserved*/, 0x01 /*Unicast SAFI*/}
-		});
-
-		openMessage.Capabilities.emplace_back(BgpCapability{RouteRefreshCapability, 0});
-
-		openMessage.Capabilities.emplace_back(BgpCapability{EnhancedRouteRefresh, 0});
-
-		openMessage.Capabilities.emplace_back(BgpCapability{FourByteAsn, 4, {_32to8(65002)}});
+		// openMessage.Capabilities.emplace_back(BgpCapability{
+		// 	MPBGP, 4, {0x01 /*IPv4 AFI*/, 0x00 /*Reserved*/, 0x01 /*Unicast SAFI*/}
+		// });
+		//
+		// openMessage.Capabilities.emplace_back(BgpCapability{RouteRefreshCapability, 0});
+		//
+		// openMessage.Capabilities.emplace_back(BgpCapability{EnhancedRouteRefresh, 0});
+		//
+		// openMessage.Capabilities.emplace_back(BgpCapability{FourByteAsn, 4, {_32to8(65002)}});
 
 		
 		auto messageHeader = generateBgpHeader(openMessage.GetLength(), MessageType::Open);
@@ -1111,6 +1118,8 @@ protected:
 				auto openMessage = parseBgpOpenMessage(payloadMessageBytes);
 				std::cout << "Received BGP OPEN message: " << std::endl;
 				std::cout << openMessage.DebugOutput();
+				auto keepalive = generateBgpHeader(0, MessageType::Keepalive);
+				SendAsync(&keepalive[0], keepalive.size());
 				break;
 			}
 			case Update:
