@@ -1060,7 +1060,987 @@ BgpNotificationMessage parseBgpNotificationMessage(const std::vector<uint8_t>& m
 	return message;
 }
 
-class BgpSession : public CppServer::Asio::TCPSession
+enum BgpSessionState
+{
+	Idle,
+	Connect,
+	Active,
+	OpenSent,
+	OpenConfirm,
+	Established
+};
+
+enum SessionAttributeFlagBits : uint16_t
+{
+	AcceptConnectionsUnconfiguredPeers = 0x0001,
+	AllowAutomaticStart = 0x0002,
+	AllowAutomaticStop = 0x0004,
+	CollisionDetectEstablishedState = 0x0008,
+	DampPeerOscillations = 0x0010,
+	DelayOpen = 0x0020,
+	PassiveTcpEstablishment = 0x0040,
+	SendNotificationWithoutOpen = 0x0080,
+	TrackTcpState = 0x0100
+};
+
+enum FsmEventType : uint8_t
+{
+	// Administrative Events
+	ManualStart,
+	ManualStop,
+	AutomaticStart,
+	ManualStartWithPassiveTcpEstablishment,
+	AutomaticStartWithPassiveTcpEstablishment,
+	AutomaticStartWithDampPeerOscillations,
+	AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment,
+	AutomaticStop,
+	// Timer Events
+	ConnectRetryTimerExpires,
+	HoldTimerExpires,
+	KeepaliveTimerExpires,
+	DelayOpenTimerExpires,
+	IdleHoldTimerExpires,
+	// TCP Connection Events
+	TcpConnectionValid,
+	TcpConnectionRequestInvalid,
+	TcpConnectionRequestAcked,
+	TcpConnectionConfirmed,
+	TcpConnectionFails,
+	// BGP Message Events
+	BgpOpen,
+	BgpOpenWithDelayOpenTimerRunning,
+	BgpHeaderError,
+	BgpOpenMessageError,
+	BgpOpenCollisionDump,
+	BgpNotificationMessageVersionError,
+	BgpNotificationMessage,
+	BgpKeepaliveMessage,
+	BgpUpdateMessage,
+	BgpUpdateMessageError
+};
+
+std::string FsmEventTypeToString(const FsmEventType eventType)
+{
+	switch (eventType)
+	{
+	case ManualStart:
+		return "ManualStart";
+	case ManualStop:
+		return "ManualStop";
+	case AutomaticStart:
+		return "AutomaticStart";
+	case ManualStartWithPassiveTcpEstablishment:
+		return "ManualStartWithPassiveTcpEstablishment";
+	case AutomaticStartWithPassiveTcpEstablishment:
+		return "AutomaticStartWithPassiveTcpEstablishment";
+	case AutomaticStartWithDampPeerOscillations:
+		return "AutomaticStartWithDampPeerOscillations";
+	case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
+		return "AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment";
+	case AutomaticStop:
+		return "AutomaticStop";
+	case ConnectRetryTimerExpires:
+		return "ConnectRetryTimerExpires";
+	case HoldTimerExpires:
+		return "HoldTimerExpires";
+	case KeepaliveTimerExpires:
+		return "KeepaliveTimerExpires";
+	case DelayOpenTimerExpires:
+		return "DelayOpenTimerExpires";
+	case IdleHoldTimerExpires:
+		return "IdleHoldTimerExpires";
+	case TcpConnectionValid:
+		return "TcpConnectionValid";
+	case TcpConnectionRequestInvalid:
+		return "TcpConnectionRequestInvalid";
+	case TcpConnectionRequestAcked:
+		return "TcpConnectionRequestAcked";
+	case TcpConnectionConfirmed:
+		return "TcpConnectionConfirmed";
+	case TcpConnectionFails:
+		return "TcpConnectionFails";
+	case BgpOpen:
+		return "BgpOpen";
+	case BgpOpenWithDelayOpenTimerRunning:
+		return "BgpOpenWithDelayOpenTimerRunning";
+	case BgpHeaderError:
+		return "BgpHeaderError";
+	case BgpOpenMessageError:
+		return "BgpOpenMessageError";
+	case BgpOpenCollisionDump:
+		return "BgpOpenCollisionDump";
+	case BgpNotificationMessageVersionError:
+		return "BgpNotificationMessageVersionError";
+	case BgpNotificationMessage:
+		return "BgpNotificationMessage";
+	case BgpKeepaliveMessage:
+		return "BgpKeepaliveMessage";
+	case BgpUpdateMessage:
+		return "BgpUpdateMessage";
+	case BgpUpdateMessageError:
+		return "BgpUpdateMessageError";
+	default:
+		return "InvalidFsmEventType";
+	}
+}
+
+struct BgpSessionTimer
+{
+	uint16_t InitialValue;
+	std::atomic<uint16_t> Value;
+	std::thread Thread;
+	std::atomic<bool> Active;
+	std::function<void(FsmEventType)> ExpiredCallback;
+	FsmEventType ExpireEventType;
+	
+	void Start()
+	{
+		if (Active.load(std::memory_order_acquire))
+		{
+			Stop();
+		}
+		Active.store(true, std::memory_order_release);
+		Thread = std::thread([this]()
+		{
+			while (Active.load(std::memory_order_acquire))
+			{
+				if (Value.load(std::memory_order_acquire) <= 0)
+				{
+					Active.store(false, std::memory_order_release);
+					ExpiredCallback(ExpireEventType);
+				}
+				else
+				{
+					// TODO: Support better/higher precision timers, this loop likely doesn't run once per second.
+					std::this_thread::sleep_for(std::chrono::seconds(1));
+					Value.store(Value - 1, std::memory_order_release);
+				}
+			}
+		});
+	}
+
+	void Stop()
+	{
+		Active.store(false, std::memory_order_release);
+		if (Thread.joinable())
+		{
+			Thread.join();
+		}
+	}
+	
+	void Restart()
+	{
+		Stop();
+		Start();
+	}
+
+	void Restart(const uint16_t initialValue)
+	{
+		Stop();
+		Reset(initialValue);
+		Start();
+	}
+
+	void Reset()
+	{
+		Value.store(InitialValue, std::memory_order_release);
+	}
+
+	void Reset(const uint16_t initialValue)
+	{
+		Stop();
+		Value.store(initialValue, std::memory_order_release);
+	}
+};
+
+struct BgpSession
+{
+	// TODO: [9]
+	uint32_t LocalIpAddress;
+	uint32_t RemoteIpAddress;
+	// TODO: [3]
+	uint16_t LocalAsn;
+	uint16_t RemoteAsn;
+	uint32_t LocalRouterId;
+	uint32_t RemoteRouterId;
+	
+	BgpSessionState State;
+	uint16_t ConnectRetryCounter = 0;
+	SessionAttributeFlagBits Attributes;
+
+	// Timer initial values
+	uint16_t ConnectRetryTime = 120;
+	uint16_t HoldTime = 90;
+	uint16_t KeepaliveTime = 90 / 3;
+	uint16_t MinASOriginationIntervalTime;
+	uint16_t MinRouteAdvertisementIntervalTime;
+	uint16_t DelayOpenTime;
+	uint16_t IdleHoldTime;
+
+	// Timers
+	BgpSessionTimer ConnectRetryTimer;
+	BgpSessionTimer HoldTimer;
+	BgpSessionTimer KeepaliveTimer;
+	BgpSessionTimer MinASOriginationIntervalTimer;
+	BgpSessionTimer MinRouteAdvertisementIntervalTimer;
+	BgpSessionTimer DelayOpenTimer;
+	BgpSessionTimer IdleHoldTimer;
+
+	uint16_t ApplyJitter(const uint16_t value)
+	{
+		return static_cast<uint16_t>((75 + rand() % 100) / 100.0f * static_cast<float>(value));
+	}
+
+	void Start()
+	{
+		State = Idle;
+		ConnectRetryCounter = 0;
+		ConnectRetryTimer.InitialValue = ConnectRetryTime;
+	}
+
+	void HandleEvent(const FsmEventType eventType)
+	{
+		switch (State)
+		{
+		case Idle:
+			HandleEventInIdleState(eventType);
+			break;
+		case Connect:
+			HandleEventInConnectState(eventType);
+			break;
+		case Active:
+			HandleEventInActiveState(eventType);
+			break;
+		case OpenSent:
+			HandleEventInOpenSentState(eventType);
+			break;
+		case OpenConfirm:
+			HandleEventInOpenConfirmState(eventType);
+			break;
+		case Established:
+			HandleEventInEstablishedState(eventType);
+			break;
+		}
+	}
+
+	void HandleEventInIdleState(const FsmEventType eventType)
+	{
+		switch (eventType)
+		{
+		case ManualStop:
+		case AutomaticStop:
+		case ConnectRetryTimerExpires:
+		case HoldTimerExpires:
+		case KeepaliveTimerExpires:
+		case DelayOpenTimerExpires:
+			break;
+		case ManualStart:
+		case AutomaticStart:
+			ConnectRetryCounter = 0;
+			ConnectRetryTimer.Start();
+			// Initiate TCP connection to peer
+			// Listen for TCP connection from peer
+			State = Connect;
+			break;
+		case ManualStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithPassiveTcpEstablishment:
+			ConnectRetryCounter = 0;
+			ConnectRetryTimer.Start();
+			// Listen for TCP connection from peer
+			State = Active;
+			break;
+		case AutomaticStartWithDampPeerOscillations:
+		case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
+		case IdleHoldTimerExpires:
+			// TODO: implement damp peer oscillation
+			break;
+		default:
+			break;
+		}
+	}
+
+	void HandleEventInConnectState(const FsmEventType eventType)
+	{
+		switch (eventType)
+		{
+		case AutomaticStart:
+		case ManualStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithDampPeerOscillations:
+		case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
+			break;
+		case ManualStop:
+			// Drop the TCP connection
+			ConnectRetryCounter = 0;
+			ConnectRetryTimer.Stop();
+			State = Idle;
+			break;
+		case ConnectRetryTimerExpires:
+			// Drop the TCP connection
+			ConnectRetryTimer.Restart();
+			DelayOpenTimer.Restart();
+			// Initiate TCP connection to peer
+			// Continue to listen for TCP connection that may be initiated from peer
+			break;
+		case DelayOpenTimerExpires:
+			// Send OPEN message to peer
+			HoldTimer.Restart(UINT16_MAX);
+			State = OpenSent;
+			break;
+		case TcpConnectionValid:
+			// Process TCP connection from peer
+			break;
+		case TcpConnectionRequestInvalid:
+			// Reject TCP connection from peer
+			break;
+		case TcpConnectionRequestAcked:
+		case TcpConnectionConfirmed:
+			if (Attributes & DelayOpen)
+			{
+				ConnectRetryTimer.Reset(0);
+				DelayOpenTimer.Restart();
+			}
+			else
+			{
+				ConnectRetryTimer.Reset(0);
+				// Complete BGP initialization
+				// Send OPEN message to peer
+				HoldTimer.Restart(UINT16_MAX);
+				State = OpenSent;
+			}
+		case TcpConnectionFails:
+			if (DelayOpenTimer.Active.load(std::memory_order_acquire))
+			{
+				ConnectRetryTimer.Restart();
+				DelayOpenTimer.Reset(0);
+				// Continue to listen for connection that may be initiated by peer
+				State = Active;
+			}
+			else
+			{
+				ConnectRetryTimer.Reset(0);
+				// Drop TCP connection
+				State = Idle;
+			}
+			break;
+		case BgpOpenWithDelayOpenTimerRunning:
+			ConnectRetryTimer.Reset(0);
+			// Complete BGP initialization
+			DelayOpenTimer.Reset(0);
+			// Send OPEN message
+			// Send KEEPALIVE message
+			if (HoldTimer.InitialValue != 0)
+			{
+				KeepaliveTimer.Start();
+				HoldTimer.Restart();
+			}
+			else
+			{
+				KeepaliveTimer.Restart();
+				HoldTimer.Reset(0);
+			}
+			State = OpenConfirm;
+			break;
+		case BgpHeaderError:
+		case BgpOpenMessageError:
+			if (Attributes & SendNotificationWithoutOpen)
+			{
+				// Send NOTIFICATION message
+			}
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case BgpNotificationMessageVersionError:
+			if (DelayOpenTimer.Active.load(std::memory_order_acquire))
+			{
+				ConnectRetryTimer.Reset(0);
+				DelayOpenTimer.Reset(0);
+				// Release all resources
+				// Drop TCP connection
+				State = Idle;
+			}
+			else
+			{
+				ConnectRetryTimer.Reset(0);
+				// Release all resources
+				// Drop TCP connection
+				++ConnectRetryCounter;
+				if (Attributes & DampPeerOscillations)
+				{
+					// TODO: support for damp peer oscillations
+				}
+				State = Idle;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	void HandleEventInActiveState(FsmEventType eventType)
+	{
+		switch (eventType)
+		{
+		case ManualStart:
+		case AutomaticStart:
+		case ManualStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithDampPeerOscillations:
+		case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
+			break;
+		case ManualStop:
+			if (DelayOpenTimer.Active.load(std::memory_order_acquire) && Attributes & SendNotificationWithoutOpen)
+			{
+				// Send NOTIFICATION with CEASE
+			}
+			// Release resources
+			DelayOpenTimer.Stop();
+			// Drop TCP connection
+			ConnectRetryCounter = 0;
+			ConnectRetryTimer.Reset(0);
+			State = Idle;
+			break;
+		case ConnectRetryTimerExpires:
+			ConnectRetryTimer.Restart();
+			// Initiate TCP connection to peer
+			// Continue to listen for TCP connection from peer
+			State = Connect;
+			break;
+		case DelayOpenTimerExpires:
+			ConnectRetryTimer.Reset(0);
+			DelayOpenTimer.Reset(0);
+			// Complete BGP initialization
+			// Send OPEN message
+			HoldTimer.Restart(UINT16_MAX);
+			State = OpenSent;
+			break;
+		case TcpConnectionValid:
+			// Process TCP connection from peer
+			break;
+		case TcpConnectionRequestInvalid:
+			// Reject TCP connection from peer
+			break;
+		case TcpConnectionRequestAcked:
+		case TcpConnectionConfirmed:
+			if (Attributes & DelayOpen)
+			{
+				ConnectRetryTimer.Reset(0);
+				DelayOpenTimer.Restart();
+			}
+			else
+			{
+				ConnectRetryTimer.Reset(0);
+				// Complete BGP initialization
+				// Send OPEN message to peer
+				HoldTimer.Restart(UINT16_MAX);
+				State = OpenSent;
+			}
+			break;
+		case TcpConnectionFails:
+			ConnectRetryTimer.Restart();
+			DelayOpenTimer.Reset(0);
+			// Release all resources
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case BgpOpenWithDelayOpenTimerRunning:
+			ConnectRetryTimer.Reset(0);
+			// Complete BGP initialization
+			DelayOpenTimer.Reset(0);
+			// Send OPEN message
+			// Send KEEPALIVE message
+			if (HoldTimer.InitialValue != 0)
+			{
+				KeepaliveTimer.Start();
+				HoldTimer.Restart();
+			}
+			else
+			{
+				KeepaliveTimer.Restart();
+				HoldTimer.Reset(0);
+			}
+			State = OpenConfirm;
+			break;
+		case BgpHeaderError:
+		case BgpOpenMessageError:
+			if (Attributes & SendNotificationWithoutOpen)
+			{
+				// Send NOTIFICATION message
+			}
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case BgpNotificationMessageVersionError:
+			if (DelayOpenTimer.Active.load(std::memory_order_acquire))
+			{
+				ConnectRetryTimer.Reset(0);
+				DelayOpenTimer.Reset(0);
+				// Release all resources
+				// Drop TCP connection
+				State = Idle;
+			}
+			else
+			{
+				ConnectRetryTimer.Reset(0);
+				// Release all resources
+				// Drop TCP connection
+				++ConnectRetryCounter;
+				if (Attributes & DampPeerOscillations)
+				{
+					// TODO: support for damp peer oscillations
+				}
+				State = Idle;
+			}
+			break;
+		case AutomaticStop:
+		case HoldTimerExpires:
+		case KeepaliveTimerExpires:
+		case IdleHoldTimerExpires:
+		case BgpOpen:
+		case BgpOpenCollisionDump:
+		case BgpNotificationMessage:
+		case BgpKeepaliveMessage:
+		case BgpUpdateMessage:
+		case BgpUpdateMessageError:
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		default:
+			break;
+		}
+	}
+
+	void HandleEventInOpenSentState(const FsmEventType eventType)
+	{
+		switch (eventType)
+		{
+		case ManualStart:
+		case AutomaticStart:
+		case ManualStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithDampPeerOscillations:
+		case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
+			break;
+		case ManualStop:
+			// Send NOTIFICATION with CEASE
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			ConnectRetryCounter = 0;
+			State = Idle;
+			break;
+		case AutomaticStop:
+			// Send NOTIFICATION with CEASE
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case HoldTimerExpires:
+			// Send NOTIFICATION with Hold Timer Expired
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case TcpConnectionValid:
+		case TcpConnectionRequestAcked:
+		case TcpConnectionConfirmed:
+			// A second TCP connection may be in progress. Track this with connection collision processing until an OPEN message is received
+		case TcpConnectionRequestInvalid:
+			break;
+		case TcpConnectionFails:
+			// Close BGP connection
+			ConnectRetryTimer.Restart();
+			// Continue to listen for a connection that may be initiated by the remote peer
+			State = Active;
+			break;
+		case BgpOpen:
+			// TODO: check message fields for correctness. Either do that here, and send an event 21 or 22 if there's an error, or do it at a higher level and propagate the event to this handler.
+			DelayOpenTimer.Reset(0);
+			ConnectRetryTimer.Reset(0);
+			// Send KEEPALIVE message
+			if (HoldTimer.InitialValue > 0)
+			{
+				KeepaliveTimer.Restart();
+				HoldTimer.Restart();
+			}
+			State = OpenConfirm;
+			// TODO: implement collision detection
+			break;
+		case BgpHeaderError:
+		case BgpOpenMessageError:
+			// Send NOTIFICATION with error code
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case BgpOpenCollisionDump:
+			// Send NOTIFICATION with CEASE
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case BgpNotificationMessageVersionError:
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			State = Idle;
+			break;
+		case ConnectRetryTimerExpires:
+		case KeepaliveTimerExpires:
+		case DelayOpenTimerExpires:
+		case IdleHoldTimerExpires:
+		case BgpOpenWithDelayOpenTimerRunning:
+		case BgpNotificationMessage:
+		case BgpKeepaliveMessage:
+		case BgpUpdateMessage:
+		case BgpUpdateMessageError:
+			// Send NOTIFICATION with FSM error
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection 
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		default:
+			break;
+		}
+	}
+
+	void HandleEventInOpenConfirmState(FsmEventType eventType)
+	{
+		switch (eventType)
+		{
+		case ManualStart:
+		case AutomaticStart:
+		case ManualStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithDampPeerOscillations:
+		case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
+			break;
+		case ManualStop:
+			// Send NOTIFICATION with CEASE
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			ConnectRetryCounter = 0;
+			State = Idle;
+			break;
+		case AutomaticStop:
+			// Send NOTIFICATION with CEASE
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case HoldTimerExpires:
+			// Send NOTIFICATION with Hold Timer Expired
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case KeepaliveTimerExpires:
+			// Send KEEPALIVE
+			KeepaliveTimer.Restart();
+			break;
+		case TcpConnectionValid:
+		case TcpConnectionRequestAcked:
+		case TcpConnectionConfirmed:
+			// Need to track second TCP connection
+			break;
+		case TcpConnectionRequestInvalid:
+			// Ignore second connection
+			break;
+		case TcpConnectionFails:
+		case BgpNotificationMessage:
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case BgpNotificationMessageVersionError:
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			State = Idle;
+			break;
+		case BgpOpen:
+			if (0)
+			{
+				// TODO: implement collision detection
+				// Send NOTIFICATION with CEASE
+				// Release all resources
+				// Drop TCP connection (TCP FIN)
+				++ConnectRetryCounter;
+				if (Attributes & DampPeerOscillations)
+				{
+					// TODO: support for damp peer oscillations
+				}
+				State = Idle;
+			}
+			break;
+		case BgpHeaderError:
+		case BgpOpenMessageError:
+			// Send NOTIFICATION message
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case BgpOpenCollisionDump:
+			// Send NOTIFICATION with CEASE
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case BgpKeepaliveMessage:
+			HoldTimer.Restart();
+			State = Established;
+			break;
+		case ConnectRetryTimerExpires:
+		case DelayOpenTimerExpires:
+		case IdleHoldTimerExpires:
+		case BgpOpenWithDelayOpenTimerRunning:
+		case BgpUpdateMessage:
+		case BgpUpdateMessageError:
+			// Send NOTIFICATION with FSM error
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		}
+	}
+
+	void HandleEventInEstablishedState(FsmEventType eventType)
+	{
+		switch (eventType)
+		{
+		case ManualStart:
+		case AutomaticStart:
+		case ManualStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithPassiveTcpEstablishment:
+		case AutomaticStartWithDampPeerOscillations:
+		case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
+			break;
+		case ManualStop:
+			// Send NOTIFICATION with CEASE
+			ConnectRetryTimer.Reset(0);
+			// Delete all routes associated with this connection
+			// Release all resources
+			// Drop TCP connection
+			ConnectRetryCounter = 0;
+			State = Idle;
+			break;
+		case AutomaticStop:
+			// Send NOTIFICATION with CEASE
+			ConnectRetryTimer.Reset(0);
+			// Delete all routes associated with this connection
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case HoldTimerExpires:
+			// Send NOTIFICATION with hold timer expired
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case KeepaliveTimerExpires:
+			// Send KEEPALIVE
+			if (HoldTimer.InitialValue > 0)
+			{
+				KeepaliveTimer.Restart();
+			}
+			break;
+		case TcpConnectionValid:
+			// Need to track second TCP connection
+			break;
+		case TcpConnectionRequestInvalid:
+			// Ignore second connection
+			break;
+		case TcpConnectionRequestAcked:
+		case TcpConnectionConfirmed:
+			// Need to track second TCP connection until OPEN message is sent
+			break;
+		case BgpOpen:
+			if (Attributes & CollisionDetectEstablishedState)
+			{
+				// TODO: propagate a BgpOpenCollisionDump event
+			}
+			break;
+		case BgpOpenCollisionDump:
+			// TODO: implement collision detection
+			if (0)
+			{
+				// Sent NOTIFICATION with CEASE
+				ConnectRetryTimer.Reset(0);
+				// Delete all routes associated with this connection
+				// Release all resources
+				// Drop TCP connection
+				++ConnectRetryCounter;
+				if (Attributes & DampPeerOscillations)
+				{
+					// TODO: support for damp peer oscillations
+				}
+				State = Idle;
+				break;
+			}
+			break;
+		case BgpNotificationMessageVersionError:
+		case BgpNotificationMessage:
+		case TcpConnectionFails:
+			ConnectRetryTimer.Reset(0);
+			// Delete all routes associated with this connection
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			State = Idle;
+		case BgpKeepaliveMessage:
+			if (HoldTimer.InitialValue > 0)
+			{
+				HoldTimer.Restart();
+			}
+			break;
+		case BgpUpdateMessage:
+			// Process UPDATE
+			// TODO: if an error is encountered, propagate a BgpUpdateMessageError event
+			if (HoldTimer.InitialValue > 0)
+			{
+				HoldTimer.Restart();
+			}
+			break;
+		case BgpUpdateMessageError:
+			// Send NOTIFICATION with UPDATE error
+			ConnectRetryTimer.Reset(0);
+			// Delete all routes associated with this connection
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		case ConnectRetryTimerExpires:
+		case DelayOpenTimerExpires:
+		case IdleHoldTimerExpires:
+		case BgpOpenWithDelayOpenTimerRunning:
+		case BgpHeaderError:
+		case BgpOpenMessageError:
+			// Send NOTIFICATION with FSM error
+			// Delete all routes associated with this connection
+			ConnectRetryTimer.Reset(0);
+			// Release all resources
+			// Drop TCP connection
+			++ConnectRetryCounter;
+			if (Attributes & DampPeerOscillations)
+			{
+				// TODO: support for damp peer oscillations
+			}
+			State = Idle;
+			break;
+		}
+	}
+};
+
+class BgpTCPSession : public CppServer::Asio::TCPSession
 {
 public:
 	using TCPSession::TCPSession;
@@ -1162,7 +2142,7 @@ public:
 protected:
 	std::shared_ptr<CppServer::Asio::TCPSession> CreateSession(const std::shared_ptr<TCPServer>& server) override
 	{
-		return std::make_shared<BgpSession>(server);
+		return std::make_shared<BgpTCPSession>(server);
 	}
 
 	void onError(int error, const std::string& category, const std::string& message) override
