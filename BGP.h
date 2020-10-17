@@ -1,4 +1,9 @@
-﻿#pragma once
+﻿//
+// Created by zach on 08/23/2020.
+//
+
+#ifndef BGP_BGP_H
+#define BGP_BGP_H
 
 // #include <cstdio>
 // #include <cstdarg>
@@ -25,3 +30,5 @@
 // TODO: [11] Support for the rest of the possible path attribute types, reference the IANA registry
 // TODO: [12] Evaluate the pros/cons of foregoing using std::vector<uint8_t>, and switching over to raw pointers (uint8_t*, void*, et al). This will require empirical evidence being gathered, via performance/memory tests, including full/multiple table edge cases
 // TODO: [13] If a BGP UPDATE message is received with the same prefix in the WithdrawnRoutes and NLRI fields, ignore the prefix in WithdrawnRoutes
+
+#endif //BGP_BGP_H
