@@ -1,3 +1,6 @@
 [submodule "extern/CppServer"]
 	path = extern/CppServer
 	url = https://github.com/chronoxor/CppServer.git
+[submodule "extern/date"]
+	path = extern/date
+	url = https://github.com/HowardHinnant/date

@@ -74,6 +74,9 @@ std::vector<uint8_t> flattenBgpUpdateMessage(const BgpUpdateMessage message) {
         updateMessage.emplace_back(nlriEntryBytes[3]);
     }
 
+    auto header = generateBgpHeader(updateMessage.size(), Update);
+    updateMessage.insert(updateMessage.begin(), header.begin(), header.end());
+
     return updateMessage;
 }
 

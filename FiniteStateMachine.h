@@ -5,10 +5,247 @@
 #ifndef BGP_FINITESTATEMACHINE_H
 #define BGP_FINITESTATEMACHINE_H
 
-#include "BGP.h"
+#include <cstdint>
+#include "Log.h"
 
-struct BgpFiniteStateMachine
-{
+enum BgpSessionState {
+    Idle,
+    Connect,
+    Active,
+    OpenSent,
+    OpenConfirm,
+    Established
+};
+
+std::string BgpSessionStateToString(const BgpSessionState sessionState) {
+    switch (sessionState) {
+        case Idle:
+            return "Idle";
+        case Connect:
+            return "Connect";
+        case Active:
+            return "Active";
+        case OpenSent:
+            return "OpenSent";
+        case OpenConfirm:
+            return "OpenConfirm";
+        case Established:
+            return "Established";
+        default:
+            return "InvalidBgpSessionState";
+    }
+}
+
+enum SessionAttributeFlagBits : uint16_t {
+    AcceptConnectionsUnconfiguredPeers = 0x0001,
+    AllowAutomaticStart = 0x0002,
+    AllowAutomaticStop = 0x0004,
+    CollisionDetectEstablishedState = 0x0008,
+    DampPeerOscillations = 0x0010,
+    DelayOpen = 0x0020,
+    PassiveTcpEstablishment = 0x0040,
+    SendNotificationWithoutOpen = 0x0080,
+    TrackTcpState = 0x0100
+};
+
+enum FsmEventType : uint8_t {
+    UnknownFsmEventType,
+    // Administrative Events
+    ManualStart,
+    ManualStop,
+    AutomaticStart,
+    ManualStartWithPassiveTcpEstablishment,
+    AutomaticStartWithPassiveTcpEstablishment,
+    AutomaticStartWithDampPeerOscillations,
+    AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment,
+    AutomaticStop,
+    // Timer Events
+    ConnectRetryTimerExpires,
+    HoldTimerExpires,
+    KeepaliveTimerExpires,
+    DelayOpenTimerExpires,
+    IdleHoldTimerExpires,
+    // TCP Connection Events
+    TcpConnectionValid,
+    TcpConnectionRequestInvalid,
+    TcpConnectionRequestAcked,
+    TcpConnectionConfirmed,
+    TcpConnectionFails,
+    // BGP Message Events
+    BgpOpenMessageReceived,
+    BgpOpenWithDelayOpenTimerRunning,
+    BgpHeaderError,
+    BgpOpenMessageError,
+    BgpOpenCollisionDump,
+    BgpNotificationMessageVersionError,
+    BgpNotificationMessageReceived,
+    BgpKeepaliveMessageReceived,
+    BgpUpdateMessageReceived,
+    BgpUpdateMessageError
+};
+
+std::string FsmEventTypeToString(const FsmEventType eventType) {
+    switch (eventType) {
+        case UnknownFsmEventType:
+            return "UnknownFsmEventType";
+        case ManualStart:
+            return "ManualStart";
+        case ManualStop:
+            return "ManualStop";
+        case AutomaticStart:
+            return "AutomaticStart";
+        case ManualStartWithPassiveTcpEstablishment:
+            return "ManualStartWithPassiveTcpEstablishment";
+        case AutomaticStartWithPassiveTcpEstablishment:
+            return "AutomaticStartWithPassiveTcpEstablishment";
+        case AutomaticStartWithDampPeerOscillations:
+            return "AutomaticStartWithDampPeerOscillations";
+        case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
+            return "AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment";
+        case AutomaticStop:
+            return "AutomaticStop";
+        case ConnectRetryTimerExpires:
+            return "ConnectRetryTimerExpires";
+        case HoldTimerExpires:
+            return "HoldTimerExpires";
+        case KeepaliveTimerExpires:
+            return "KeepaliveTimerExpires";
+        case DelayOpenTimerExpires:
+            return "DelayOpenTimerExpires";
+        case IdleHoldTimerExpires:
+            return "IdleHoldTimerExpires";
+        case TcpConnectionValid:
+            return "TcpConnectionValid";
+        case TcpConnectionRequestInvalid:
+            return "TcpConnectionRequestInvalid";
+        case TcpConnectionRequestAcked:
+            return "TcpConnectionRequestAcked";
+        case TcpConnectionConfirmed:
+            return "TcpConnectionConfirmed";
+        case TcpConnectionFails:
+            return "TcpConnectionFails";
+        case BgpOpenMessageReceived:
+            return "BgpOpenMessageReceived";
+        case BgpOpenWithDelayOpenTimerRunning:
+            return "BgpOpenWithDelayOpenTimerRunning";
+        case BgpHeaderError:
+            return "BgpHeaderError";
+        case BgpOpenMessageError:
+            return "BgpOpenMessageError";
+        case BgpOpenCollisionDump:
+            return "BgpOpenCollisionDump";
+        case BgpNotificationMessageVersionError:
+            return "BgpNotificationMessageVersionError";
+        case BgpNotificationMessageReceived:
+            return "BgpNotificationMessageReceived";
+        case BgpKeepaliveMessageReceived:
+            return "BgpKeepaliveMessageReceived";
+        case BgpUpdateMessageReceived:
+            return "BgpUpdateMessageReceived";
+        case BgpUpdateMessageError:
+            return "BgpUpdateMessageError";
+        default:
+            return "InvalidFsmEventType";
+    }
+}
+
+struct BgpSessionTimer {
+    uint16_t InitialValue;
+    std::atomic<uint16_t> Value;
+    std::thread Thread;
+    std::atomic<bool> Active;
+    std::function<void(FsmEventType)> ExpiredCallback;
+    FsmEventType ExpireEventType;
+
+    BgpSessionTimer() {}
+
+    BgpSessionTimer(const uint16_t initialValue, std::function<void(FsmEventType)> expiredCallback,
+                    const FsmEventType expireEventType)
+            : InitialValue(initialValue),
+              ExpiredCallback(expiredCallback),
+              ExpireEventType(expireEventType) {
+        Reset();
+    }
+
+    BgpSessionTimer(const BgpSessionTimer &other)
+            : InitialValue(other.InitialValue),
+              ExpiredCallback(other.ExpiredCallback),
+              ExpireEventType(other.ExpireEventType) {
+        Value.store(other.Value.load(std::memory_order_acquire), std::memory_order_release);
+        Active.store(other.Active.load(std::memory_order_acquire), std::memory_order_release);
+    }
+
+    BgpSessionTimer &operator=(const BgpSessionTimer &other) {
+        if (this == &other)
+            return *this;
+        InitialValue = other.InitialValue;
+        Value.store(other.Value.load(std::memory_order_acquire), std::memory_order_release);
+        Active.store(other.Active.load(std::memory_order_acquire), std::memory_order_release);
+        ExpiredCallback = other.ExpiredCallback;
+        ExpireEventType = other.ExpireEventType;
+        return *this;
+    }
+
+    BgpSessionTimer &operator=(BgpSessionTimer &&other) {
+        if (this == &other)
+            return *this;
+        InitialValue = other.InitialValue;
+        Value.store(other.Value.load(std::memory_order_acquire), std::memory_order_release);
+        Active.store(other.Active.load(std::memory_order_acquire), std::memory_order_release);
+        ExpiredCallback = std::move(other.ExpiredCallback);
+        ExpireEventType = other.ExpireEventType;
+        return *this;
+    }
+
+    void Start() {
+        if (Active.load(std::memory_order_acquire)) {
+            Stop();
+        }
+        Active.store(true, std::memory_order_release);
+        Thread = std::thread([this]() {
+            while (Active.load(std::memory_order_acquire)) {
+                if (Value.load(std::memory_order_acquire) <= 0) {
+                    Active.store(false, std::memory_order_release);
+                    ExpiredCallback(ExpireEventType);
+                } else {
+                    // TODO: Support better/higher precision timers, this loop likely doesn't run once per second.
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    Value.store(Value - 1, std::memory_order_release);
+                }
+            }
+        });
+    }
+
+    void Stop() {
+        Active.store(false, std::memory_order_release);
+        if (Thread.joinable()) {
+            Thread.join();
+        }
+    }
+
+    void Restart() {
+        Stop();
+        Start();
+    }
+
+    void Restart(const uint16_t initialValue) {
+        Stop();
+        Reset(initialValue);
+        Start();
+    }
+
+    void Reset() {
+        Stop();
+        Value.store(InitialValue, std::memory_order_release);
+    }
+
+    void Reset(const uint16_t initialValue) {
+        Stop();
+        Value.store(initialValue, std::memory_order_release);
+    }
+};
+
+struct BgpFiniteStateMachine {
     // TODO: [9]
     uint32_t LocalIpAddress;
     uint32_t RemoteIpAddress;
@@ -18,7 +255,7 @@ struct BgpFiniteStateMachine
     uint32_t LocalRouterId;
     uint32_t RemoteRouterId;
 
-    BgpSessionState State;
+    BgpSessionState State = Idle;
     uint16_t ConnectRetryCounter = 0;
     SessionAttributeFlagBits Attributes;
 
@@ -40,79 +277,79 @@ struct BgpFiniteStateMachine
     BgpSessionTimer DelayOpenTimer;
     BgpSessionTimer IdleHoldTimer;
 
-    std::function<void(std::vector<uint8_t>)> SendMessageToPeer;
+    std::function<void(std::vector<uint8_t>)> SendMessageToPeer = [](auto bytes) { std::cerr << "Empty std::function Bgp::FiniteStateMachine::SendMessageToPeer called." << std::endl; };
 
     std::vector<BgpCapability> Capabilities;
+
+    BgpFiniteStateMachine() {}
 
 
     BgpFiniteStateMachine(const uint32_t localIpAddress, const uint32_t remoteIpAddress, const uint16_t localAsn,
                           const uint16_t remoteAsn, const uint32_t localRouterId, const uint32_t remoteRouterId,
                           const SessionAttributeFlagBits attributes, const uint16_t connectRetryTime = 120,
-                          const uint16_t holdTime = 90, const uint16_t keepaliveTime = holdTime / 3,
+                          const uint16_t holdTime = 90, const uint16_t keepaliveTime = 90 / 3,
                           const uint16_t minAsOriginationIntervalTime = 0,
-                          const uint16_t minRouteAdvertisementIntervalTime = 0, const uint16_t delayOpenTime,
-                          const uint16_t idleHoldTime, std::function<void(std::vector<uint8_t>)> sendMessageToPeer,
-                          const std::vector<BgpCapability> capabilities) : LocalIpAddress(localIpAddress),
-                                                                           RemoteIpAddress(remoteIpAddress),
-                                                                           LocalAsn(localAsn), RemoteAsn(remoteAsn),
-                                                                           LocalRouterId(localRouterId),
-                                                                           RemoteRouterId(remoteRouterId),
-                                                                           Attributes(attributes),
-                                                                           ConnectRetryTime(connectRetryTime),
-                                                                           HoldTime(holdTime), KeepaliveTime(keepaliveTime),
-                                                                           MinASOriginationIntervalTime(
-                                                                                   minAsOriginationIntervalTime),
-                                                                           MinRouteAdvertisementIntervalTime(
-                                                                                   minRouteAdvertisementIntervalTime),
-                                                                           DelayOpenTime(delayOpenTime),
-                                                                           IdleHoldTime(idleHoldTime),
-                                                                           ConnectRetryTimer(
-                                                                                   connectRetryTime,
-                                                                                   [&](const FsmEventType eventType)
-                                                                                   {
-                                                                                       HandleEvent(eventType);
-                                                                                   }, ConnectRetryTimerExpires),
-                                                                           HoldTimer(
-                                                                                   holdTime, [&](const FsmEventType eventType)
-                                                                                   {
-                                                                                       HandleEvent(eventType);
-                                                                                   }, HoldTimerExpires),
-                                                                           KeepaliveTimer(
-                                                                                   keepaliveTime,
-                                                                                   [&](const FsmEventType eventType)
-                                                                                   {
-                                                                                       HandleEvent(eventType);
-                                                                                   }, KeepaliveTimerExpires),
-                                                                           MinASOriginationIntervalTimer(
-                                                                                   minAsOriginationIntervalTime,
-                                                                                   [&](const FsmEventType eventType)
-                                                                                   {
-                                                                                       HandleEvent(eventType);
-                                                                                   }, UnknownFsmEventType),
-                                                                           MinRouteAdvertisementIntervalTimer(
-                                                                                   minRouteAdvertisementIntervalTime,
-                                                                                   [&](const FsmEventType eventType)
-                                                                                   {
-                                                                                       HandleEvent(eventType);
-                                                                                   }, UnknownFsmEventType),
-                                                                           DelayOpenTimer(
-                                                                                   delayOpenTime,
-                                                                                   [&](const FsmEventType eventType)
-                                                                                   {
-                                                                                       HandleEvent(eventType);
-                                                                                   }, DelayOpenTimerExpires),
-                                                                           IdleHoldTimer(
-                                                                                   idleHoldTime, [&](const FsmEventType eventType)
-                                                                                   {
-                                                                                       HandleEvent(eventType);
-                                                                                   }, IdleHoldTimerExpires),
-                                                                           SendMessageToPeer(std::move(sendMessageToPeer)),
-                                                                           Capabilities(capabilities)
-    {
+                          const uint16_t minRouteAdvertisementIntervalTime = 0, const uint16_t delayOpenTime = 0,
+                          const uint16_t idleHoldTime = 0,
+                          std::function<void(std::vector<uint8_t>)> sendMessageToPeer = nullptr,
+                          const std::vector<BgpCapability> capabilities = {}) : LocalIpAddress(localIpAddress),
+                                                                                RemoteIpAddress(remoteIpAddress),
+                                                                                LocalAsn(localAsn),
+                                                                                RemoteAsn(remoteAsn),
+                                                                                LocalRouterId(localRouterId),
+                                                                                RemoteRouterId(remoteRouterId),
+                                                                                Attributes(attributes),
+                                                                                ConnectRetryTime(connectRetryTime),
+                                                                                HoldTime(holdTime),
+                                                                                KeepaliveTime(keepaliveTime),
+                                                                                MinASOriginationIntervalTime(
+                                                                                        minAsOriginationIntervalTime),
+                                                                                MinRouteAdvertisementIntervalTime(
+                                                                                        minRouteAdvertisementIntervalTime),
+                                                                                DelayOpenTime(delayOpenTime),
+                                                                                IdleHoldTime(idleHoldTime),
+                                                                                ConnectRetryTimer(
+                                                                                        connectRetryTime,
+                                                                                        [&](const FsmEventType eventType) {
+                                                                                            HandleEvent(eventType);
+                                                                                        }, ConnectRetryTimerExpires),
+                                                                                HoldTimer(
+                                                                                        holdTime,
+                                                                                        [&](const FsmEventType eventType) {
+                                                                                            HandleEvent(eventType);
+                                                                                        }, HoldTimerExpires),
+                                                                                KeepaliveTimer(
+                                                                                        keepaliveTime,
+                                                                                        [&](const FsmEventType eventType) {
+                                                                                            HandleEvent(eventType);
+                                                                                        }, KeepaliveTimerExpires),
+                                                                                MinASOriginationIntervalTimer(
+                                                                                        minAsOriginationIntervalTime,
+                                                                                        [&](const FsmEventType eventType) {
+                                                                                            HandleEvent(eventType);
+                                                                                        }, UnknownFsmEventType),
+                                                                                MinRouteAdvertisementIntervalTimer(
+                                                                                        minRouteAdvertisementIntervalTime,
+                                                                                        [&](const FsmEventType eventType) {
+                                                                                            HandleEvent(eventType);
+                                                                                        }, UnknownFsmEventType),
+                                                                                DelayOpenTimer(
+                                                                                        delayOpenTime,
+                                                                                        [&](const FsmEventType eventType) {
+                                                                                            HandleEvent(eventType);
+                                                                                        }, DelayOpenTimerExpires),
+                                                                                IdleHoldTimer(
+                                                                                        idleHoldTime,
+                                                                                        [&](const FsmEventType eventType) {
+                                                                                            HandleEvent(eventType);
+                                                                                        }, IdleHoldTimerExpires),
+                                                                                SendMessageToPeer(
+                                                                                        std::move(sendMessageToPeer)),
+                                                                                Capabilities(capabilities) {
     }
 
 
-    BgpFiniteStateMachine(const BgpFiniteStateMachine& other)
+    BgpFiniteStateMachine(const BgpFiniteStateMachine &other)
             : LocalIpAddress(other.LocalIpAddress),
               RemoteIpAddress(other.RemoteIpAddress),
               LocalAsn(other.LocalAsn),
@@ -137,11 +374,10 @@ struct BgpFiniteStateMachine
               DelayOpenTimer(other.DelayOpenTimer),
               IdleHoldTimer(other.IdleHoldTimer),
               SendMessageToPeer(other.SendMessageToPeer),
-              Capabilities(other.Capabilities)
-    {
+              Capabilities(other.Capabilities) {
     }
 
-    BgpFiniteStateMachine(BgpFiniteStateMachine&& other)
+    BgpFiniteStateMachine(BgpFiniteStateMachine &&other)
             : LocalIpAddress(other.LocalIpAddress),
               RemoteIpAddress(other.RemoteIpAddress),
               LocalAsn(other.LocalAsn),
@@ -166,12 +402,10 @@ struct BgpFiniteStateMachine
               DelayOpenTimer(std::move(other.DelayOpenTimer)),
               IdleHoldTimer(std::move(other.IdleHoldTimer)),
               SendMessageToPeer(std::move(other.SendMessageToPeer)),
-              Capabilities(std::move(other.Capabilities))
-    {
+              Capabilities(std::move(other.Capabilities)) {
     }
 
-    BgpFiniteStateMachine& operator=(const BgpFiniteStateMachine& other)
-    {
+    BgpFiniteStateMachine &operator=(const BgpFiniteStateMachine &other) {
         if (this == &other)
             return *this;
         LocalIpAddress = other.LocalIpAddress;
@@ -202,8 +436,7 @@ struct BgpFiniteStateMachine
         return *this;
     }
 
-    BgpFiniteStateMachine& operator=(BgpFiniteStateMachine&& other)
-    {
+    BgpFiniteStateMachine &operator=(BgpFiniteStateMachine &&other) {
         if (this == &other)
             return *this;
         LocalIpAddress = other.LocalIpAddress;
@@ -234,22 +467,19 @@ struct BgpFiniteStateMachine
         return *this;
     }
 
-    uint16_t ApplyJitter(const uint16_t value)
-    {
+    uint16_t ApplyJitter(const uint16_t value) {
         return static_cast<uint16_t>((75 + rand() % 100) / 100.0f * static_cast<float>(value));
     }
 
-    void Start()
-    {
+    void Start() {
         State = Idle;
         ConnectRetryCounter = 0;
         ConnectRetryTimer.InitialValue = ConnectRetryTime;
     }
 
-    void HandleEvent(const FsmEventType eventType)
-    {
-        switch (State)
-        {
+    void HandleEvent(const FsmEventType eventType) {
+        std::cout << "[DEBUG] Handling FSM event " << FsmEventTypeToString(eventType) << " in state " << BgpSessionStateToString(State) << std::endl;
+        switch (State) {
             case Idle:
                 HandleEventInIdleState(eventType);
                 break;
@@ -271,10 +501,8 @@ struct BgpFiniteStateMachine
         }
     }
 
-    void HandleEventInIdleState(const FsmEventType eventType)
-    {
-        switch (eventType)
-        {
+    void HandleEventInIdleState(const FsmEventType eventType) {
+        switch (eventType) {
             case ManualStop:
             case AutomaticStop:
             case ConnectRetryTimerExpires:
@@ -307,10 +535,8 @@ struct BgpFiniteStateMachine
         }
     }
 
-    void HandleEventInConnectState(const FsmEventType eventType)
-    {
-        switch (eventType)
-        {
+    void HandleEventInConnectState(const FsmEventType eventType) {
+        switch (eventType) {
             case AutomaticStart:
             case ManualStartWithPassiveTcpEstablishment:
             case AutomaticStartWithPassiveTcpEstablishment:
@@ -332,7 +558,7 @@ struct BgpFiniteStateMachine
                 break;
             case DelayOpenTimerExpires:
                 // Send OPEN message to peer
-                SendMessageToPeer(flattenBgpOpenMessage({ 0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities }));
+                SendMessageToPeer(flattenBgpOpenMessage({0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities}));
                 HoldTimer.Restart(UINT16_MAX);
                 State = OpenSent;
                 break;
@@ -344,109 +570,96 @@ struct BgpFiniteStateMachine
                 break;
             case TcpConnectionRequestAcked:
             case TcpConnectionConfirmed:
-                if (Attributes & DelayOpen)
-                {
+                if (Attributes & DelayOpen) {
                     ConnectRetryTimer.Reset(0);
                     DelayOpenTimer.Restart();
-                }
-                else
-                {
+                } else {
                     ConnectRetryTimer.Reset(0);
                     // Complete BGP initialization
                     // Send OPEN message to peer
-                    SendMessageToPeer(flattenBgpOpenMessage({ 0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities }));
+                    SendMessageToPeer(flattenBgpOpenMessage({0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities}));
                     HoldTimer.Restart(UINT16_MAX);
                     State = OpenSent;
                 }
             case TcpConnectionFails:
-                if (DelayOpenTimer.Active.load(std::memory_order_acquire))
-                {
+                if (DelayOpenTimer.Active.load(std::memory_order_acquire)) {
                     ConnectRetryTimer.Restart();
                     DelayOpenTimer.Reset(0);
                     // Continue to listen for connection that may be initiated by peer
                     State = Active;
-                }
-                else
-                {
+                } else {
                     ConnectRetryTimer.Reset(0);
                     // Drop TCP connection
                     State = Idle;
                 }
                 break;
-            case BgpOpenWithDelayOpenTimerRunning:
+            case BgpOpenWithDelayOpenTimerRunning: {
                 ConnectRetryTimer.Reset(0);
                 // Complete BGP initialization
                 DelayOpenTimer.Reset(0);
                 // Send OPEN message
-                SendMessageToPeer(flattenBgpOpenMessage({ 0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities }));
+                SendMessageToPeer(flattenBgpOpenMessage({0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities}));
                 // Send KEEPALIVE message
                 std::vector<uint8_t> keepaliveMessageBytes(18);
                 auto messageHeader = generateBgpHeader(0, MessageType::Keepalive);
                 keepaliveMessageBytes.insert(keepaliveMessageBytes.begin(), messageHeader.begin(), messageHeader.end());
                 SendMessageToPeer(keepaliveMessageBytes);
-                if (HoldTimer.InitialValue != 0)
-                {
+                if (HoldTimer.InitialValue != 0) {
                     KeepaliveTimer.Start();
                     HoldTimer.Restart();
-                }
-                else
-                {
+                } else {
                     KeepaliveTimer.Restart();
                     HoldTimer.Reset(0);
                 }
                 State = OpenConfirm;
                 break;
+            }
             case BgpHeaderError:
-            case BgpOpenMessageError:
-                if (Attributes & SendNotificationWithoutOpen)
-                {
+            case BgpOpenMessageError: {
+                if (Attributes & SendNotificationWithoutOpen) {
                     // Send NOTIFICATION message
                     BgpNotificationMessage message;
                     message.Error.Code = eventType == BgpHeaderError ? MessageHeaderError : OpenMessageError;
-                    message.Error.Subcode = eventType == BgpHeaderError ? UnspecificMessageHeaderError : UnspecificOpenMessageError;
+                    message.Error.Subcode =
+                            eventType == BgpHeaderError ? UnspecificMessageHeaderError : UnspecificOpenMessageError;
                     SendMessageToPeer(flattenBgpNotificationMessage(message));
                 }
                 ConnectRetryTimer.Reset(0);
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
                 break;
-            case BgpNotificationMessageVersionError:
-                if (DelayOpenTimer.Active.load(std::memory_order_acquire))
-                {
+            }
+            case BgpNotificationMessageVersionError: {
+                if (DelayOpenTimer.Active.load(std::memory_order_acquire)) {
                     ConnectRetryTimer.Reset(0);
                     DelayOpenTimer.Reset(0);
                     // Release all resources
                     // Drop TCP connection
                     State = Idle;
-                }
-                else
-                {
+                } else {
                     ConnectRetryTimer.Reset(0);
                     // Release all resources
                     // Drop TCP connection
                     ++ConnectRetryCounter;
-                    if (Attributes & DampPeerOscillations)
-                    {
+                    if (Attributes & DampPeerOscillations) {
                         // TODO: support for damp peer oscillations
                     }
                     State = Idle;
                 }
                 break;
+            }
             default:
                 break;
         }
     }
 
-    void HandleEventInActiveState(FsmEventType eventType)
-    {
-        switch (eventType)
-        {
+    void HandleEventInActiveState(FsmEventType eventType) {
+        switch (eventType) {
             case ManualStart:
             case AutomaticStart:
             case ManualStartWithPassiveTcpEstablishment:
@@ -455,8 +668,7 @@ struct BgpFiniteStateMachine
             case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
                 break;
             case ManualStop:
-                if (DelayOpenTimer.Active.load(std::memory_order_acquire) && Attributes & SendNotificationWithoutOpen)
-                {
+                if (DelayOpenTimer.Active.load(std::memory_order_acquire) && Attributes & SendNotificationWithoutOpen) {
                     // Send NOTIFICATION with CEASE
                     BgpNotificationMessage message;
                     message.Error.Code = CeaseError;
@@ -493,17 +705,17 @@ struct BgpFiniteStateMachine
                 break;
             case TcpConnectionRequestAcked:
             case TcpConnectionConfirmed:
-                if (Attributes & DelayOpen)
-                {
+                PrintLogMessage("TRACE", "BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed");
+                if (Attributes & DelayOpen) {
                     ConnectRetryTimer.Reset(0);
                     DelayOpenTimer.Restart();
-                }
-                else
-                {
+                } else {
                     ConnectRetryTimer.Reset(0);
                     // Complete BGP initialization
                     // Send OPEN message to peer
+                    PrintLogMessage("TRACE", "BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed::SendOPENMessageToPeer");
                     SendMessageToPeer(flattenBgpOpenMessage({0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities}));
+                    PrintLogMessage("TRACE", "BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed::SendOPENMessageToPeer::Complete");
                     HoldTimer.Restart(UINT16_MAX);
                     State = OpenSent;
                 }
@@ -513,8 +725,7 @@ struct BgpFiniteStateMachine
                 DelayOpenTimer.Reset(0);
                 // Release all resources
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -524,16 +735,13 @@ struct BgpFiniteStateMachine
                 // Complete BGP initialization
                 DelayOpenTimer.Reset(0);
                 // Send OPEN message
-                SendMessageToPeer(flattenBgpOpenMessage({ 0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities }));
+                SendMessageToPeer(flattenBgpOpenMessage({0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities}));
                 // Send KEEPALIVE message
                 SendKeepaliveMessage();
-                if (HoldTimer.InitialValue != 0)
-                {
+                if (HoldTimer.InitialValue != 0) {
                     KeepaliveTimer.Start();
                     HoldTimer.Restart();
-                }
-                else
-                {
+                } else {
                     KeepaliveTimer.Restart();
                     HoldTimer.Reset(0);
                 }
@@ -541,8 +749,7 @@ struct BgpFiniteStateMachine
                 break;
             case BgpHeaderError:
             case BgpOpenMessageError:
-                if (Attributes & SendNotificationWithoutOpen)
-                {
+                if (Attributes & SendNotificationWithoutOpen) {
                     // Send NOTIFICATION message
                     SendNotificationMessage(OpenMessageError, 0x00);
                 }
@@ -550,29 +757,24 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
                 break;
             case BgpNotificationMessageVersionError:
-                if (DelayOpenTimer.Active.load(std::memory_order_acquire))
-                {
+                if (DelayOpenTimer.Active.load(std::memory_order_acquire)) {
                     ConnectRetryTimer.Reset(0);
                     DelayOpenTimer.Reset(0);
                     // Release all resources
                     // Drop TCP connection
                     State = Idle;
-                }
-                else
-                {
+                } else {
                     ConnectRetryTimer.Reset(0);
                     // Release all resources
                     // Drop TCP connection
                     ++ConnectRetryCounter;
-                    if (Attributes & DampPeerOscillations)
-                    {
+                    if (Attributes & DampPeerOscillations) {
                         // TODO: support for damp peer oscillations
                     }
                     State = Idle;
@@ -592,8 +794,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -603,26 +804,22 @@ struct BgpFiniteStateMachine
         }
     }
 
-    void SendNotificationMessage(uint8_t Code, uint8_t Subcode)
-    {
+    void SendNotificationMessage(uint8_t Code, uint8_t Subcode) {
         BgpNotificationMessage message;
         message.Error.Code = Code;
         message.Error.Subcode = Subcode;
         SendMessageToPeer(flattenBgpNotificationMessage(message));
     }
 
-    void SendKeepaliveMessage()
-    {
+    void SendKeepaliveMessage() {
         std::vector<uint8_t> messageBytes;
         auto headerBytes = generateBgpHeader(0x00, Keepalive);
         messageBytes.insert(messageBytes.end(), headerBytes.begin(), headerBytes.end());
         SendMessageToPeer(messageBytes);
     }
 
-    void HandleEventInOpenSentState(const FsmEventType eventType)
-    {
-        switch (eventType)
-        {
+    void HandleEventInOpenSentState(const FsmEventType eventType) {
+        switch (eventType) {
             case ManualStart:
             case AutomaticStart:
             case ManualStartWithPassiveTcpEstablishment:
@@ -630,8 +827,7 @@ struct BgpFiniteStateMachine
             case AutomaticStartWithDampPeerOscillations:
             case AutomaticStartWithDampPeerOscillationsAndPassiveTcpEstablishment:
                 break;
-            case ManualStop:
-            {
+            case ManualStop: {
                 // Send NOTIFICATION with CEASE
                 SendNotificationMessage(CeaseError, AdministrativeShutdown);
                 ConnectRetryTimer.Reset(0);
@@ -641,16 +837,14 @@ struct BgpFiniteStateMachine
                 State = Idle;
                 break;
             }
-            case AutomaticStop:
-            {
+            case AutomaticStop: {
                 // Send NOTIFICATION with CEASE
                 SendNotificationMessage(CeaseError, AdministrativeShutdown);
                 ConnectRetryTimer.Reset(0);
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -663,8 +857,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -687,8 +880,7 @@ struct BgpFiniteStateMachine
                 ConnectRetryTimer.Reset(0);
                 // Send KEEPALIVE message
                 SendKeepaliveMessage();
-                if (HoldTimer.InitialValue > 0)
-                {
+                if (HoldTimer.InitialValue > 0) {
                     KeepaliveTimer.Restart();
                     HoldTimer.Restart();
                 }
@@ -703,8 +895,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -716,8 +907,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -743,8 +933,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -754,10 +943,8 @@ struct BgpFiniteStateMachine
         }
     }
 
-    void HandleEventInOpenConfirmState(FsmEventType eventType)
-    {
-        switch (eventType)
-        {
+    void HandleEventInOpenConfirmState(FsmEventType eventType) {
+        switch (eventType) {
             case ManualStart:
             case AutomaticStart:
             case ManualStartWithPassiveTcpEstablishment:
@@ -781,8 +968,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -794,8 +980,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -819,8 +1004,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -832,16 +1016,14 @@ struct BgpFiniteStateMachine
                 State = Idle;
                 break;
             case BgpOpenMessageReceived:
-                if (0)
-                {
+                if (0) {
                     // TODO: implement collision detection
                     // Send NOTIFICATION with CEASE
                     SendNotificationMessage(CeaseError, ConnectionCollisionResolution);
                     // Release all resources
                     // Drop TCP connection (TCP FIN)
                     ++ConnectRetryCounter;
-                    if (Attributes & DampPeerOscillations)
-                    {
+                    if (Attributes & DampPeerOscillations) {
                         // TODO: support for damp peer oscillations
                     }
                     State = Idle;
@@ -855,8 +1037,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -868,8 +1049,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -890,8 +1070,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -899,10 +1078,8 @@ struct BgpFiniteStateMachine
         }
     }
 
-    void HandleEventInEstablishedState(FsmEventType eventType)
-    {
-        switch (eventType)
-        {
+    void HandleEventInEstablishedState(FsmEventType eventType) {
+        switch (eventType) {
             case ManualStart:
             case AutomaticStart:
             case ManualStartWithPassiveTcpEstablishment:
@@ -928,8 +1105,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -941,8 +1117,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -950,8 +1125,7 @@ struct BgpFiniteStateMachine
             case KeepaliveTimerExpires:
                 // Send KEEPALIVE
                 SendKeepaliveMessage();
-                if (HoldTimer.InitialValue > 0)
-                {
+                if (HoldTimer.InitialValue > 0) {
                     KeepaliveTimer.Restart();
                 }
                 break;
@@ -966,24 +1140,21 @@ struct BgpFiniteStateMachine
                 // Need to track second TCP connection until OPEN message is sent
                 break;
             case BgpOpenMessageReceived:
-                if (Attributes & CollisionDetectEstablishedState)
-                {
+                if (Attributes & CollisionDetectEstablishedState) {
                     // TODO: propagate a BgpOpenCollisionDump event
                 }
                 break;
             case BgpOpenCollisionDump:
                 // TODO: implement collision detection
-                if (0)
-                {
-                    // Sent NOTIFICATION with CEASE
+                if (0) {
+                    // Send NOTIFICATION with CEASE
                     SendNotificationMessage(CeaseError, ConnectionCollisionResolution);
                     ConnectRetryTimer.Reset(0);
                     // Delete all routes associated with this connection
                     // Release all resources
                     // Drop TCP connection
                     ++ConnectRetryCounter;
-                    if (Attributes & DampPeerOscillations)
-                    {
+                    if (Attributes & DampPeerOscillations) {
                         // TODO: support for damp peer oscillations
                     }
                     State = Idle;
@@ -1000,16 +1171,14 @@ struct BgpFiniteStateMachine
                 ++ConnectRetryCounter;
                 State = Idle;
             case BgpKeepaliveMessageReceived:
-                if (HoldTimer.InitialValue > 0)
-                {
+                if (HoldTimer.InitialValue > 0) {
                     HoldTimer.Restart();
                 }
                 break;
             case BgpUpdateMessageReceived:
                 // Process UPDATE
                 // TODO: if an error is encountered, propagate a BgpUpdateMessageError event
-                if (HoldTimer.InitialValue > 0)
-                {
+                if (HoldTimer.InitialValue > 0) {
                     HoldTimer.Restart();
                 }
                 break;
@@ -1021,8 +1190,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;
@@ -1040,8 +1208,7 @@ struct BgpFiniteStateMachine
                 // Release all resources
                 // Drop TCP connection
                 ++ConnectRetryCounter;
-                if (Attributes & DampPeerOscillations)
-                {
+                if (Attributes & DampPeerOscillations) {
                     // TODO: support for damp peer oscillations
                 }
                 State = Idle;

@@ -41,6 +41,8 @@ std::vector<uint8_t> flattenBgpNotificationMessage(const BgpNotificationMessage 
 {
     std::vector<uint8_t> notificationMessage = { message.Error.Code, message.Error.Subcode };
     notificationMessage.insert(notificationMessage.end(), message.Data.begin(), message.Data.end());
+    auto header = generateBgpHeader(notificationMessage.size(), Notification);
+    notificationMessage.insert(notificationMessage.begin(), header.begin(), header.end());
     return notificationMessage;
 }
 

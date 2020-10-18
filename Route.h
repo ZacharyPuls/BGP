@@ -12,7 +12,7 @@
 #include <vector>
 #include "Util.h"
 
-typedef struct {
+typedef struct ROUTE {
     uint8_t Length;
     uint32_t Prefix;
     // TODO: [9]

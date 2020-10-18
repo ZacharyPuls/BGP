@@ -5,6 +5,11 @@
 #ifndef BGP_BGPOPENMESSAGE_H
 #define BGP_BGPOPENMESSAGE_H
 
+#include <cstdint>
+#include "BgpCapability.h"
+#include "Util.h"
+#include "BgpHeader.h"
+
 struct BgpOpenMessage
 {
     const uint8_t Version = 0x04;
@@ -67,6 +72,8 @@ std::vector<uint8_t> flattenBgpOpenMessage(const BgpOpenMessage message)
     auto capabilities = flattenBgpCapabilities(message.Capabilities);
     openMessage.insert(openMessage.end(), capabilities.begin(), capabilities.end());
 
+    auto header = generateBgpHeader(openMessage.size(), Open);
+    openMessage.insert(openMessage.begin(), header.begin(), header.end());
     return openMessage;
 }
 
