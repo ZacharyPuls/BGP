@@ -19,7 +19,7 @@ public:
 //    using TCPSession::TCPSession;
 
     BgpTCPSession(const std::shared_ptr<CppServer::Asio::TCPServer>& server, std::shared_ptr<BgpFiniteStateMachine>& fsm) : TCPSession(server), fsm_(fsm) {
-        fsm_->SendMessageToPeer = [=](auto bytes) { SendBytes(this, &bytes[0], bytes.size()); };
+        fsm_->SendMessageToPeer = [this](auto bytes) { SendBytes(this, &bytes[0], bytes.size()); };
     }
 
 protected:
@@ -27,10 +27,11 @@ protected:
     static void SendBytes(BgpTCPSession* session, void* bytes, size_t size) {
         auto messageBytes = std::vector<uint8_t>(size);
         messageBytes.assign(static_cast<uint8_t*>(bytes), static_cast<uint8_t*>(bytes) + size);
-//        std::stringstream message;
-//        message << "Sending bytes to peer [" << std::accumulate(messageBytes.begin() + 1, messageBytes.end(), std::to_string(messageBytes[0]), [](const std::string &a, int b) { return a + ',' + std::to_string(b); }) << "]";
-//        PrintLogMessage("DEBUG", message.str());
-        session->SendAsync(bytes, size);
+        std::stringstream message;
+        message << "Sending bytes to peer [" << std::accumulate(messageBytes.begin() + 1, messageBytes.end(), std::to_string(messageBytes[0]), [](const std::string &a, int b) { return a + ',' + std::to_string(b); }) << "]";
+        logging::DEBUG(message.str());
+//        session->SendAsync(bytes, size);
+        session->Send(bytes, size);
     }
 
     void onConnected() override {
@@ -103,9 +104,9 @@ protected:
             switch (header.Type) {
                 case Open: {
                     auto openMessage = parseBgpOpenMessage(payloadMessageBytes);
-                    std::stringstream message;
-                    message << "Received BGP OPEN message: " << openMessage.DebugOutput();
-                    logging::DEBUG(message.str());
+//                    std::stringstream message;
+//                    message << "Received BGP OPEN message: " << openMessage.DebugOutput();
+//                    logging::DEBUG(message.str());
                      fsm_->HandleEvent(BgpOpenMessageReceived);
 //                    fsm.HandleEvent(TcpConnectionConfirmed);
 //                    auto keepalive = generateBgpHeader(0, MessageType::Keepalive);
