@@ -277,11 +277,9 @@ struct BgpFiniteStateMachine {
     BgpSessionTimer DelayOpenTimer;
     BgpSessionTimer IdleHoldTimer;
 
-    std::function<void(std::vector<uint8_t>)> SendMessageToPeer = [](auto bytes) { std::cerr << "Empty std::function Bgp::FiniteStateMachine::SendMessageToPeer called." << std::endl; };
+    std::function<void(std::vector<uint8_t>)> SendMessageToPeer = [](auto bytes) { std::stringstream message; message << "Empty std::function Bgp::FiniteStateMachine::SendMessageToPeer called."; logging::ERROR(message.str()); };
 
     std::vector<BgpCapability> Capabilities;
-
-    BgpFiniteStateMachine() {}
 
 
     BgpFiniteStateMachine(const uint32_t localIpAddress, const uint32_t remoteIpAddress, const uint16_t localAsn,
@@ -310,37 +308,37 @@ struct BgpFiniteStateMachine {
                                                                                 IdleHoldTime(idleHoldTime),
                                                                                 ConnectRetryTimer(
                                                                                         connectRetryTime,
-                                                                                        [&](const FsmEventType eventType) {
+                                                                                        [this](const FsmEventType eventType) {
                                                                                             HandleEvent(eventType);
                                                                                         }, ConnectRetryTimerExpires),
                                                                                 HoldTimer(
                                                                                         holdTime,
-                                                                                        [&](const FsmEventType eventType) {
+                                                                                        [this](const FsmEventType eventType) {
                                                                                             HandleEvent(eventType);
                                                                                         }, HoldTimerExpires),
                                                                                 KeepaliveTimer(
                                                                                         keepaliveTime,
-                                                                                        [&](const FsmEventType eventType) {
+                                                                                        [this](const FsmEventType eventType) {
                                                                                             HandleEvent(eventType);
                                                                                         }, KeepaliveTimerExpires),
                                                                                 MinASOriginationIntervalTimer(
                                                                                         minAsOriginationIntervalTime,
-                                                                                        [&](const FsmEventType eventType) {
+                                                                                        [this](const FsmEventType eventType) {
                                                                                             HandleEvent(eventType);
                                                                                         }, UnknownFsmEventType),
                                                                                 MinRouteAdvertisementIntervalTimer(
                                                                                         minRouteAdvertisementIntervalTime,
-                                                                                        [&](const FsmEventType eventType) {
+                                                                                        [this](const FsmEventType eventType) {
                                                                                             HandleEvent(eventType);
                                                                                         }, UnknownFsmEventType),
                                                                                 DelayOpenTimer(
                                                                                         delayOpenTime,
-                                                                                        [&](const FsmEventType eventType) {
+                                                                                        [this](const FsmEventType eventType) {
                                                                                             HandleEvent(eventType);
                                                                                         }, DelayOpenTimerExpires),
                                                                                 IdleHoldTimer(
                                                                                         idleHoldTime,
-                                                                                        [&](const FsmEventType eventType) {
+                                                                                        [this](const FsmEventType eventType) {
                                                                                             HandleEvent(eventType);
                                                                                         }, IdleHoldTimerExpires),
                                                                                 SendMessageToPeer(
@@ -475,10 +473,13 @@ struct BgpFiniteStateMachine {
         State = Idle;
         ConnectRetryCounter = 0;
         ConnectRetryTimer.InitialValue = ConnectRetryTime;
+        ConnectRetryTimer.Reset();
     }
 
     void HandleEvent(const FsmEventType eventType) {
-        std::cout << "[DEBUG] Handling FSM event " << FsmEventTypeToString(eventType) << " in state " << BgpSessionStateToString(State) << std::endl;
+        std::stringstream message;
+        message << "Handling FSM event " << FsmEventTypeToString(eventType) << " in state " << BgpSessionStateToString(State);
+        logging::DEBUG(message.str());
         switch (State) {
             case Idle:
                 HandleEventInIdleState(eventType);
@@ -705,7 +706,7 @@ struct BgpFiniteStateMachine {
                 break;
             case TcpConnectionRequestAcked:
             case TcpConnectionConfirmed:
-                PrintLogMessage("TRACE", "BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed");
+                logging::TRACE("BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed");
                 if (Attributes & DelayOpen) {
                     ConnectRetryTimer.Reset(0);
                     DelayOpenTimer.Restart();
@@ -713,9 +714,9 @@ struct BgpFiniteStateMachine {
                     ConnectRetryTimer.Reset(0);
                     // Complete BGP initialization
                     // Send OPEN message to peer
-                    PrintLogMessage("TRACE", "BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed::SendOPENMessageToPeer");
+                    logging::TRACE("BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed::SendOPENMessageToPeer");
                     SendMessageToPeer(flattenBgpOpenMessage({0x04, LocalAsn, HoldTime, LocalRouterId, Capabilities}));
-                    PrintLogMessage("TRACE", "BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed::SendOPENMessageToPeer::Complete");
+                    logging::TRACE("BgpFiniteStateMachine::ActiveState::TcpConnectionConfirmed::SendOPENMessageToPeer::Complete");
                     HoldTimer.Restart(UINT16_MAX);
                     State = OpenSent;
                 }

@@ -5,6 +5,8 @@
 #ifndef BGP_BGP_H
 #define BGP_BGP_H
 
+#define LOGGING_LEVEL_ALL
+
 // #include <cstdio>
 // #include <cstdarg>
 // #include <gmp.h>

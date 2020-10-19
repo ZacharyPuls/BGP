@@ -3,6 +3,7 @@
 //
 
 #include <numeric>
+#include <iomanip>
 
 #include "BGP.h"
 #include "BgpOpenMessage.h"
@@ -13,15 +14,12 @@
 #include "FiniteStateMachine.h"
 #include "Log.h"
 
-// TODO: track this via user-defined config file (or interactive configuration)
-BgpFiniteStateMachine fsm;
-
 class BgpTCPSession : public CppServer::Asio::TCPSession {
 public:
 //    using TCPSession::TCPSession;
 
-    BgpTCPSession(const std::shared_ptr<CppServer::Asio::TCPServer> &server) : TCPSession(server) {
-        fsm.SendMessageToPeer = [=](auto bytes) { SendBytes(this, &bytes[0], bytes.size()); };
+    BgpTCPSession(const std::shared_ptr<CppServer::Asio::TCPServer>& server, std::shared_ptr<BgpFiniteStateMachine>& fsm) : TCPSession(server), fsm_(fsm) {
+        fsm_->SendMessageToPeer = [=](auto bytes) { SendBytes(this, &bytes[0], bytes.size()); };
     }
 
 protected:
@@ -75,15 +73,15 @@ protected:
                 << std::to_string((remote_addr >> 16) & 0xFF) << "."
                 << std::to_string((remote_addr >> 8) & 0xFF) << "."
                 << std::to_string(remote_addr & 0xFF) << ".";
-        PrintLogMessage("DEBUG", message.str());
-        fsm.HandleEvent(TcpConnectionConfirmed);
+        logging::DEBUG(message.str());
+        fsm_->HandleEvent(TcpConnectionConfirmed);
     }
 
     void onDisconnected() override {
         std::stringstream message;
         message << "BgpSession with ID " << id() << " was disconnected.";
-        PrintLogMessage("INFO", message.str());
-        fsm.HandleEvent(AutomaticStop);
+        logging::INFO(message.str());
+        fsm_->HandleEvent(AutomaticStop);
     }
 
     void onReceived(const void *buffer, size_t size) override {
@@ -97,17 +95,18 @@ protected:
             std::stringstream message;
             message << "Received BGP message header with Type " << MessageTypeToString(header.Type) << " and Length "
                     << header.Length;
-            PrintLogMessage("INFO", message.str());
+            logging::INFO(message.str());
         }
         if (header.Length > 19) {
-            const std::vector<uint8_t> payloadMessageBytes(messageBytes.begin() + 19, messageBytes.end());
+            // TODO: I have no clue why I'm receiving TCP segments from my home router with a bunch of garbage appended to the end, but in every case, the length is correct in the header. Should look into this in the future.
+            const std::vector<uint8_t> payloadMessageBytes(messageBytes.begin() + 19, messageBytes.begin() + header.Length);
             switch (header.Type) {
                 case Open: {
                     auto openMessage = parseBgpOpenMessage(payloadMessageBytes);
                     std::stringstream message;
                     message << "Received BGP OPEN message: " << openMessage.DebugOutput();
-                    PrintLogMessage("DEBUG", message.str());
-                     fsm.HandleEvent(BgpOpenMessageReceived);
+                    logging::DEBUG(message.str());
+                     fsm_->HandleEvent(BgpOpenMessageReceived);
 //                    fsm.HandleEvent(TcpConnectionConfirmed);
 //                    auto keepalive = generateBgpHeader(0, MessageType::Keepalive);
 //                    SendAsync(&keepalive[0], keepalive.size());
@@ -117,22 +116,22 @@ protected:
                     auto updateMessage = parseBgpUpdateMessage(payloadMessageBytes);
                     std::stringstream message;
                     message << "Received BGP UPDATE message: " << updateMessage.DebugOutput();
-                    PrintLogMessage("DEBUG", message.str());
-                    fsm.HandleEvent(BgpUpdateMessageReceived);
+                    logging::DEBUG(message.str());
+                    fsm_->HandleEvent(BgpUpdateMessageReceived);
                     break;
                 }
                 case Notification: {
                     auto notificationMessage = parseBgpNotificationMessage(payloadMessageBytes);
                     std::stringstream message;
                     message << "Received BGP NOTIFICATION message: " << notificationMessage.DebugOutput();
-                    PrintLogMessage("DEBUG", message.str());
-                    fsm.HandleEvent(BgpNotificationMessageReceived);
+                    logging::DEBUG(message.str());
+                    fsm_->HandleEvent(BgpNotificationMessageReceived);
                     break;
                 }
                 case Keepalive: {
                     std::stringstream message;
                     message << "Keepalive message received with Length > 19. This is not RFC4271-compliant.";
-                    PrintLogMessage("ERROR", message.str());
+                    logging::ERROR(message.str());
                     break;
                 }
                 case ReservedMessageType:
@@ -140,26 +139,26 @@ protected:
                 default: {
                     std::stringstream message;
                     message << "Unsupported message type " << MessageTypeToString(header.Type);
-                    PrintLogMessage("ERROR", message.str());
+                    logging::ERROR(message.str());
                     break;
                 }
             }
         } else if (header.Length == 19 && header.Type == Keepalive) {
-            fsm.HandleEvent(BgpKeepaliveMessageReceived);
+            fsm_->HandleEvent(BgpKeepaliveMessageReceived);
         } else {
             std::stringstream message;
             message << "Malformed BGP message received: ["
                       << std::accumulate(messageBytes.begin() + 1, messageBytes.end(), std::to_string(messageBytes[0]),
                                          [](const std::string &a, int b) { return a + ',' + std::to_string(b); })
                       << "]";
-            PrintLogMessage("ERROR", message.str());
+            logging::ERROR(message.str());
         }
 
 
         {
             std::stringstream message;
-            message << "FSM state: " << BgpSessionStateToString(fsm.State);
-            PrintLogMessage("DEBUG", message.str());
+            message << "FSM state: " << BgpSessionStateToString(fsm_->State);
+            logging::DEBUG(message.str());
         }
     }
 
@@ -167,50 +166,56 @@ protected:
         std::stringstream messageString;
         messageString << "BgpSession caught an error with code " << error << " and category '" << category << "': "
                   << message;
-        PrintLogMessage("ERROR", messageString.str());
+        logging::ERROR(messageString.str());
     }
 
 private:
+    std::shared_ptr<BgpFiniteStateMachine> fsm_;
 };
 
 class BgpServer : public CppServer::Asio::TCPServer {
 public:
     using TCPServer::TCPServer;
 
+    bool Start() override {
+        // TODO: track this via user-defined config file (or interactive configuration)
+        fsm_ = std::make_shared<BgpFiniteStateMachine>(BgpFiniteStateMachine{0x0A010166, 0x0A010101, 65002, 65001, 16843009, 0,
+                                                       AllowAutomaticStop, {}, 180, 60, {}, {}, {}, {}, nullptr, {}});
+        fsm_->Start();
+        fsm_->HandleEvent(AutomaticStartWithPassiveTcpEstablishment);
+        return TCPServer::Start();
+    }
+
 protected:
     std::shared_ptr<CppServer::Asio::TCPSession> CreateSession(const std::shared_ptr<TCPServer> &server) override {
-        return std::make_shared<BgpTCPSession>(server);
+        return std::make_shared<BgpTCPSession>(server, fsm_);
     }
 
     void onError(int error, const std::string &category, const std::string &message) override {
         std::stringstream messageString;
         messageString << "BgpServer caught an error with code " << error << " and category '" << category << "': "
                   << message;
-        PrintLogMessage("ERROR", messageString.str());
+        logging::ERROR(messageString.str());
     }
 
 private:
-
+    std::shared_ptr<BgpFiniteStateMachine> fsm_;
 };
 
 int main() {
-    PrintLogMessage("INFO", "Starting BgpServer on port 179.");
+    logging::INFO("Starting BgpServer on port 179.");
     auto service = std::make_shared<CppServer::Asio::Service>();
 
-    PrintLogMessage("INFO", "Starting Asio service...");
+    logging::INFO("Starting Asio service...");
     service->Start();
-    PrintLogMessage("INFO", "Asio service started.");
+    logging::INFO("Asio service started.");
 
     auto server = std::make_shared<BgpServer>(service, 179);
 
-    PrintLogMessage("INFO", "Starting BgpServer...");
+    logging::INFO("Starting BgpServer...");
     server->Start();
-    PrintLogMessage("INFO", "BgpServer started.");
+    logging::INFO("BgpServer started.");
 
-    fsm = BgpFiniteStateMachine(0x0A010166, 0x0A010101, 65002, 65001, 16843009, 0, AllowAutomaticStop, {}, 180, 60, {},
-                                {}, {}, {}, nullptr, {});
-    fsm.Start();
-    fsm.HandleEvent(AutomaticStartWithPassiveTcpEstablishment);
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -219,13 +224,13 @@ int main() {
         }
     }
 
-    PrintLogMessage("INFO", "Stopping BgpServer...");
+    logging::INFO("Stopping BgpServer...");
     server->Stop();
-    PrintLogMessage("INFO", "BgpServer stopped.");
+    logging::INFO("BgpServer stopped.");
 
-    PrintLogMessage("INFO", "Stopping Asio service...");
+    logging::INFO("Stopping Asio service...");
     service->Stop();
-    PrintLogMessage("INFO", "Asio service stopped.");
+    logging::INFO("Asio service stopped.");
 
     return 0;
 }
