@@ -12,5 +12,8 @@ set_property(TARGET BGP PROPERTY CXX_STANDARD_REQUIRED true)
 
 #add_subdirectory("extern/date")
 
-target_link_libraries(BGP)
+# TODO: portability :)
+find_library(WS2_32_LIBRARY ws2_32)
+
+target_link_libraries(BGP ${WS2_32_LIBRARY})
 target_include_directories(BGP PRIVATE "extern/date/include")
