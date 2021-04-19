@@ -5,8 +5,6 @@
 #ifndef BGP_BGP_H
 #define BGP_BGP_H
 
-#define LOGGING_LEVEL_ALL
-
 // #include <cstdio>
 // #include <cstdarg>
 // #include <gmp.h>
@@ -16,8 +14,9 @@
 #include <cassert>
 #include <functional>
 #include <sstream>
+#include "Log.h"
+#include "Networking.h"
 
-#include <server/asio/tcp_server.h>
 
 // TODO: [1] Verify support for RFC 6286 (ASNs do not need to be unique)
 // TODO: [2] Support for RFC 6608 (Extended FSM error subcodes)
@@ -32,5 +31,6 @@
 // TODO: [11] Support for the rest of the possible path attribute types, reference the IANA registry
 // TODO: [12] Evaluate the pros/cons of foregoing using std::vector<uint8_t>, and switching over to raw pointers (uint8_t*, void*, et al). This will require empirical evidence being gathered, via performance/memory tests, including full/multiple table edge cases
 // TODO: [13] If a BGP UPDATE message is received with the same prefix in the WithdrawnRoutes and NLRI fields, ignore the prefix in WithdrawnRoutes
+// TODO: [14] Multithreading, split out BGPServer/BGPSession
 
 #endif //BGP_BGP_H

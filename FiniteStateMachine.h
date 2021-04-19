@@ -6,6 +6,8 @@
 #define BGP_FINITESTATEMACHINE_H
 
 #include <cstdint>
+#include <utility>
+#include <functional>
 #include "Log.h"
 
 enum BgpSessionState {
@@ -149,30 +151,26 @@ std::string FsmEventTypeToString(const FsmEventType eventType) {
     }
 }
 
+struct BgpFiniteStateMachine;
+
+static void HandleTimerEvent(const std::shared_ptr<BgpFiniteStateMachine>& fsm, FsmEventType eventType);
+
 struct BgpSessionTimer {
-    uint16_t InitialValue;
+    uint16_t InitialValue{};
     std::atomic<uint16_t> Value;
     std::thread Thread;
     std::atomic<bool> Active;
-    std::function<void(FsmEventType)> ExpiredCallback;
+    std::shared_ptr<BgpFiniteStateMachine> Parent;
     FsmEventType ExpireEventType;
 
-    BgpSessionTimer() {}
+    BgpSessionTimer() = default;
 
-    BgpSessionTimer(const uint16_t initialValue, std::function<void(FsmEventType)> expiredCallback,
+    BgpSessionTimer(const uint16_t initialValue, std::shared_ptr<BgpFiniteStateMachine> parent,
                     const FsmEventType expireEventType)
             : InitialValue(initialValue),
-              ExpiredCallback(expiredCallback),
+              Parent(std::move(parent)),
               ExpireEventType(expireEventType) {
         Reset();
-    }
-
-    BgpSessionTimer(const BgpSessionTimer &other)
-            : InitialValue(other.InitialValue),
-              ExpiredCallback(other.ExpiredCallback),
-              ExpireEventType(other.ExpireEventType) {
-        Value.store(other.Value.load(std::memory_order_acquire), std::memory_order_release);
-        Active.store(other.Active.load(std::memory_order_acquire), std::memory_order_release);
     }
 
     BgpSessionTimer &operator=(const BgpSessionTimer &other) {
@@ -181,18 +179,7 @@ struct BgpSessionTimer {
         InitialValue = other.InitialValue;
         Value.store(other.Value.load(std::memory_order_acquire), std::memory_order_release);
         Active.store(other.Active.load(std::memory_order_acquire), std::memory_order_release);
-        ExpiredCallback = other.ExpiredCallback;
-        ExpireEventType = other.ExpireEventType;
-        return *this;
-    }
-
-    BgpSessionTimer &operator=(BgpSessionTimer &&other) {
-        if (this == &other)
-            return *this;
-        InitialValue = other.InitialValue;
-        Value.store(other.Value.load(std::memory_order_acquire), std::memory_order_release);
-        Active.store(other.Active.load(std::memory_order_acquire), std::memory_order_release);
-        ExpiredCallback = std::move(other.ExpiredCallback);
+        Parent = other.Parent;
         ExpireEventType = other.ExpireEventType;
         return *this;
     }
@@ -202,18 +189,20 @@ struct BgpSessionTimer {
             Stop();
         }
         Active.store(true, std::memory_order_release);
-        Thread = std::thread([this]() {
-            while (Active.load(std::memory_order_acquire)) {
-                if (Value.load(std::memory_order_acquire) <= 0) {
-                    Active.store(false, std::memory_order_release);
-                    ExpiredCallback(ExpireEventType);
-                } else {
-                    // TODO: Support better/higher precision timers, this loop likely doesn't run once per second.
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                    Value.store(Value - 1, std::memory_order_release);
-                }
+        Thread = std::thread(BgpSessionTimer::TimerThread, this);
+    }
+
+    static void TimerThread(BgpSessionTimer* timer) {
+        while (timer->Active.load(std::memory_order_acquire)) {
+            if (timer->Value.load(std::memory_order_acquire) <= 0) {
+                timer->Active.store(false, std::memory_order_release);
+                HandleTimerEvent(timer->Parent, timer->ExpireEventType);
+            } else {
+                // TODO: Support better/higher precision timers, this loop likely doesn't run once per second.
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                timer->Value.store(timer->Value - 1, std::memory_order_release);
             }
-        });
+        }
     }
 
     void Stop() {
@@ -306,167 +295,76 @@ struct BgpFiniteStateMachine {
                                                                                         minRouteAdvertisementIntervalTime),
                                                                                 DelayOpenTime(delayOpenTime),
                                                                                 IdleHoldTime(idleHoldTime),
-                                                                                ConnectRetryTimer(
-                                                                                        connectRetryTime,
-                                                                                        [this](const FsmEventType eventType) {
-                                                                                            HandleEvent(eventType);
-                                                                                        }, ConnectRetryTimerExpires),
-                                                                                HoldTimer(
-                                                                                        holdTime,
-                                                                                        [this](const FsmEventType eventType) {
-                                                                                            HandleEvent(eventType);
-                                                                                        }, HoldTimerExpires),
-                                                                                KeepaliveTimer(
-                                                                                        keepaliveTime,
-                                                                                        [this](const FsmEventType eventType) {
-                                                                                            HandleEvent(eventType);
-                                                                                        }, KeepaliveTimerExpires),
+                                                                                ConnectRetryTimer(connectRetryTime,
+                                                                                                  std::shared_ptr<BgpFiniteStateMachine>(
+                                                                                                          this),
+                                                                                                  ConnectRetryTimerExpires),
+                                                                                HoldTimer(holdTime,
+                                                                                          std::shared_ptr<BgpFiniteStateMachine>(
+                                                                                                  this),
+                                                                                          HoldTimerExpires),
+                                                                                KeepaliveTimer(keepaliveTime,
+                                                                                               std::shared_ptr<BgpFiniteStateMachine>(
+                                                                                                       this),
+                                                                                               KeepaliveTimerExpires),
                                                                                 MinASOriginationIntervalTimer(
                                                                                         minAsOriginationIntervalTime,
-                                                                                        [this](const FsmEventType eventType) {
-                                                                                            HandleEvent(eventType);
-                                                                                        }, UnknownFsmEventType),
+                                                                                        std::shared_ptr<BgpFiniteStateMachine>(
+                                                                                                this),
+                                                                                        UnknownFsmEventType),
                                                                                 MinRouteAdvertisementIntervalTimer(
                                                                                         minRouteAdvertisementIntervalTime,
-                                                                                        [this](const FsmEventType eventType) {
-                                                                                            HandleEvent(eventType);
-                                                                                        }, UnknownFsmEventType),
-                                                                                DelayOpenTimer(
-                                                                                        delayOpenTime,
-                                                                                        [this](const FsmEventType eventType) {
-                                                                                            HandleEvent(eventType);
-                                                                                        }, DelayOpenTimerExpires),
-                                                                                IdleHoldTimer(
-                                                                                        idleHoldTime,
-                                                                                        [this](const FsmEventType eventType) {
-                                                                                            HandleEvent(eventType);
-                                                                                        }, IdleHoldTimerExpires),
+                                                                                        std::shared_ptr<BgpFiniteStateMachine>(
+                                                                                                this),
+                                                                                        UnknownFsmEventType),
+                                                                                DelayOpenTimer(delayOpenTime,
+                                                                                               std::shared_ptr<BgpFiniteStateMachine>(
+                                                                                                       this),
+                                                                                               DelayOpenTimerExpires),
+                                                                                IdleHoldTimer(idleHoldTime,
+                                                                                              std::shared_ptr<BgpFiniteStateMachine>(
+                                                                                                      this),
+                                                                                              IdleHoldTimerExpires),
                                                                                 SendMessageToPeer(
                                                                                         std::move(sendMessageToPeer)),
                                                                                 Capabilities(capabilities) {
     }
 
+    BgpFiniteStateMachine(const BgpFiniteStateMachine &other) {
+        this->LocalIpAddress = other.LocalIpAddress;
+        this->RemoteIpAddress = other.RemoteIpAddress;
+        this->LocalAsn = other.LocalAsn;
+        this->RemoteAsn = other.RemoteAsn;
+        this->LocalRouterId = other.LocalRouterId;
+        this->RemoteRouterId = other.RemoteRouterId;
 
-    BgpFiniteStateMachine(const BgpFiniteStateMachine &other)
-            : LocalIpAddress(other.LocalIpAddress),
-              RemoteIpAddress(other.RemoteIpAddress),
-              LocalAsn(other.LocalAsn),
-              RemoteAsn(other.RemoteAsn),
-              LocalRouterId(other.LocalRouterId),
-              RemoteRouterId(other.RemoteRouterId),
-              State(other.State),
-              ConnectRetryCounter(other.ConnectRetryCounter),
-              Attributes(other.Attributes),
-              ConnectRetryTime(other.ConnectRetryTime),
-              HoldTime(other.HoldTime),
-              KeepaliveTime(other.KeepaliveTime),
-              MinASOriginationIntervalTime(other.MinASOriginationIntervalTime),
-              MinRouteAdvertisementIntervalTime(other.MinRouteAdvertisementIntervalTime),
-              DelayOpenTime(other.DelayOpenTime),
-              IdleHoldTime(other.IdleHoldTime),
-              ConnectRetryTimer(other.ConnectRetryTimer),
-              HoldTimer(other.HoldTimer),
-              KeepaliveTimer(other.KeepaliveTimer),
-              MinASOriginationIntervalTimer(other.MinASOriginationIntervalTimer),
-              MinRouteAdvertisementIntervalTimer(other.MinRouteAdvertisementIntervalTimer),
-              DelayOpenTimer(other.DelayOpenTimer),
-              IdleHoldTimer(other.IdleHoldTimer),
-              SendMessageToPeer(other.SendMessageToPeer),
-              Capabilities(other.Capabilities) {
-    }
+        this->State = other.State;
+        this->ConnectRetryCounter = other.ConnectRetryCounter;
+        this->Attributes = other.Attributes;
 
-    BgpFiniteStateMachine(BgpFiniteStateMachine &&other)
-            : LocalIpAddress(other.LocalIpAddress),
-              RemoteIpAddress(other.RemoteIpAddress),
-              LocalAsn(other.LocalAsn),
-              RemoteAsn(other.RemoteAsn),
-              LocalRouterId(other.LocalRouterId),
-              RemoteRouterId(other.RemoteRouterId),
-              State(other.State),
-              ConnectRetryCounter(other.ConnectRetryCounter),
-              Attributes(other.Attributes),
-              ConnectRetryTime(other.ConnectRetryTime),
-              HoldTime(other.HoldTime),
-              KeepaliveTime(other.KeepaliveTime),
-              MinASOriginationIntervalTime(other.MinASOriginationIntervalTime),
-              MinRouteAdvertisementIntervalTime(other.MinRouteAdvertisementIntervalTime),
-              DelayOpenTime(other.DelayOpenTime),
-              IdleHoldTime(other.IdleHoldTime),
-              ConnectRetryTimer(std::move(other.ConnectRetryTimer)),
-              HoldTimer(std::move(other.HoldTimer)),
-              KeepaliveTimer(std::move(other.KeepaliveTimer)),
-              MinASOriginationIntervalTimer(std::move(other.MinASOriginationIntervalTimer)),
-              MinRouteAdvertisementIntervalTimer(std::move(other.MinRouteAdvertisementIntervalTimer)),
-              DelayOpenTimer(std::move(other.DelayOpenTimer)),
-              IdleHoldTimer(std::move(other.IdleHoldTimer)),
-              SendMessageToPeer(std::move(other.SendMessageToPeer)),
-              Capabilities(std::move(other.Capabilities)) {
-    }
+        this->ConnectRetryTime = other.ConnectRetryTime;
+        this->HoldTime = other.HoldTime;
+        this->KeepaliveTime = other.KeepaliveTime;
+        this->MinASOriginationIntervalTime = other.MinASOriginationIntervalTime;
+        this->MinRouteAdvertisementIntervalTime = other.MinRouteAdvertisementIntervalTime;
+        this->DelayOpenTime = other.DelayOpenTime;
+        this->IdleHoldTime = other.IdleHoldTime;
 
-    BgpFiniteStateMachine &operator=(const BgpFiniteStateMachine &other) {
-        if (this == &other)
-            return *this;
-        LocalIpAddress = other.LocalIpAddress;
-        RemoteIpAddress = other.RemoteIpAddress;
-        LocalAsn = other.LocalAsn;
-        RemoteAsn = other.RemoteAsn;
-        LocalRouterId = other.LocalRouterId;
-        RemoteRouterId = other.RemoteRouterId;
-        State = other.State;
-        ConnectRetryCounter = other.ConnectRetryCounter;
-        Attributes = other.Attributes;
-        ConnectRetryTime = other.ConnectRetryTime;
-        HoldTime = other.HoldTime;
-        KeepaliveTime = other.KeepaliveTime;
-        MinASOriginationIntervalTime = other.MinASOriginationIntervalTime;
-        MinRouteAdvertisementIntervalTime = other.MinRouteAdvertisementIntervalTime;
-        DelayOpenTime = other.DelayOpenTime;
-        IdleHoldTime = other.IdleHoldTime;
-        ConnectRetryTimer = other.ConnectRetryTimer;
-        HoldTimer = other.HoldTimer;
-        KeepaliveTimer = other.KeepaliveTimer;
-        MinASOriginationIntervalTimer = other.MinASOriginationIntervalTimer;
-        MinRouteAdvertisementIntervalTimer = other.MinRouteAdvertisementIntervalTimer;
-        DelayOpenTimer = other.DelayOpenTimer;
-        IdleHoldTimer = other.IdleHoldTimer;
-        SendMessageToPeer = other.SendMessageToPeer;
-        Capabilities = other.Capabilities;
-        return *this;
-    }
+        this->ConnectRetryTimer = other.ConnectRetryTimer;
+        this->HoldTimer = other.HoldTimer;
+        this->KeepaliveTimer = other.KeepaliveTimer;
+        this->MinASOriginationIntervalTimer = other.MinASOriginationIntervalTimer;
+        this->MinRouteAdvertisementIntervalTimer = other.MinRouteAdvertisementIntervalTimer;
+        this->DelayOpenTimer = other.DelayOpenTimer;
+        this->IdleHoldTimer = other.IdleHoldTimer;
 
-    BgpFiniteStateMachine &operator=(BgpFiniteStateMachine &&other) {
-        if (this == &other)
-            return *this;
-        LocalIpAddress = other.LocalIpAddress;
-        RemoteIpAddress = other.RemoteIpAddress;
-        LocalAsn = other.LocalAsn;
-        RemoteAsn = other.RemoteAsn;
-        LocalRouterId = other.LocalRouterId;
-        RemoteRouterId = other.RemoteRouterId;
-        State = other.State;
-        ConnectRetryCounter = other.ConnectRetryCounter;
-        Attributes = other.Attributes;
-        ConnectRetryTime = other.ConnectRetryTime;
-        HoldTime = other.HoldTime;
-        KeepaliveTime = other.KeepaliveTime;
-        MinASOriginationIntervalTime = other.MinASOriginationIntervalTime;
-        MinRouteAdvertisementIntervalTime = other.MinRouteAdvertisementIntervalTime;
-        DelayOpenTime = other.DelayOpenTime;
-        IdleHoldTime = other.IdleHoldTime;
-        ConnectRetryTimer = std::move(other.ConnectRetryTimer);
-        HoldTimer = std::move(other.HoldTimer);
-        KeepaliveTimer = std::move(other.KeepaliveTimer);
-        MinASOriginationIntervalTimer = std::move(other.MinASOriginationIntervalTimer);
-        MinRouteAdvertisementIntervalTimer = std::move(other.MinRouteAdvertisementIntervalTimer);
-        DelayOpenTimer = std::move(other.DelayOpenTimer);
-        IdleHoldTimer = std::move(other.IdleHoldTimer);
-        SendMessageToPeer = std::move(other.SendMessageToPeer);
-        Capabilities = std::move(other.Capabilities);
-        return *this;
+        this->SendMessageToPeer = other.SendMessageToPeer;
+
+        this->Capabilities = other.Capabilities;
     }
 
     uint16_t ApplyJitter(const uint16_t value) {
-        return static_cast<uint16_t>((75 + rand() % 100) / 100.0f * static_cast<float>(value));
+        return static_cast<uint16_t>(static_cast<float>(75 + rand() % 100) / 100.0f * static_cast<float>(value));
     }
 
     void Start() {
@@ -1217,5 +1115,14 @@ struct BgpFiniteStateMachine {
         }
     }
 };
+
+// Wrapping HandleEvent call for [...]TimerExpired event in static method to see if it will fix the timer thread
+//  not receiving proper state from FiniteStateMachine when called
+static void HandleTimerEvent(const std::shared_ptr<BgpFiniteStateMachine>& fsm, const FsmEventType eventType) {
+    std::stringstream message;
+    message << "Current FSM state - " << BgpSessionStateToString(fsm->State);
+    logging::TRACE(message.str());
+    fsm->HandleEvent(eventType);
+}
 
 #endif //BGP_FINITESTATEMACHINE_H

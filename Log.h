@@ -1,6 +1,7 @@
 //
 // Created by zach on 10/18/2020.
 // Pulled from: https://gist.github.com/kevinkreiser/39f2e39273c625d96790, credit to Kevin Kreiser
+// Adapted to allow printing of Winsock2 error messages
 //
 
 #ifndef BGP_LOG_H
@@ -14,6 +15,12 @@
 #include <mutex>
 #include <iostream>
 #include <fstream>
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+// Windows.h MACRO-s ERROR...
+#undef ERROR
 
 namespace logging {
 
@@ -249,6 +256,14 @@ namespace logging {
     inline void ERROR(const std::string& message) {
         get_logger().log(message, log_level::ERROR);
     };
+
+    namespace sockets {
+        inline void ERROR(const std::string& callingFunctionName) {
+            std::stringstream message;
+            message << "Call to " << callingFunctionName << " failed. Error was: " << std::to_string(WSAGetLastError());
+            get_logger().log(message.str(), log_level::ERROR);
+        }
+    }
 }
 
 #endif //BGP_LOG_H
